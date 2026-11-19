@@ -36,6 +36,10 @@ export function loadMap(file: MapFile): CityMap {
   const popBytes = bytes(file.population);
   const pop = new Uint16Array(popBytes.buffer, popBytes.byteOffset, width * height);
   for (let i = 0; i < pop.length; i++) world.healthy[i] = world.land[i] ? pop[i] : 0;
+  const major = bytes(file.layers.roadMajor);
+  const minor = bytes(file.layers.roadMinor);
+  const bridge = bytes(file.layers.bridge);
+  for (let i = 0; i < world.road.length; i++) world.road[i] = major[i] || bridge[i] ? 3 : minor[i] ? 1 : 0;
   return {
     name: file.name,
     credit: file.credit,

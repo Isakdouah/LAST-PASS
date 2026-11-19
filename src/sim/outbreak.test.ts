@@ -36,4 +36,26 @@ describe('outbreak simulation', () => {
     for (let y = 0; y < 10; y++) for (let x = 11; x < 20; x++) farSide += w.infected[y * 20 + x];
     expect(farSide).toBe(0);
   });
+
+  it('flows faster along roads', () => {
+    const make = (withRoad: boolean) => {
+      const w = createWorld(60, 21);
+      w.healthy.fill(50);
+      if (withRoad) for (let x = 0; x < 60; x++) w.road[10 * 60 + x] = 3;
+      w.infected[10 * 60] = 20;
+      return w;
+    };
+    let a = make(true);
+    let b = make(false);
+    for (let t = 0; t < 25; t++) {
+      a = step(a);
+      b = step(b);
+    }
+    const reach = (w: ReturnType<typeof make>) => {
+      let far = 0;
+      for (let x = 0; x < 60; x++) if (w.infected[10 * 60 + x] + w.fallen[10 * 60 + x] > 1) far = x;
+      return far;
+    };
+    expect(reach(a)).toBeGreaterThan(reach(b));
+  });
 });

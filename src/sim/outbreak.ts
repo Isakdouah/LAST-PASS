@@ -8,6 +8,8 @@ export interface World {
   height: number;
   /** false = water or blocked: the dead cannot cross (for now). */
   land: Uint8Array;
+  /** 0 = no road, higher = bigger road. The dead flow faster and prefer roads. */
+  road: Uint8Array;
   healthy: Float32Array;
   infected: Float32Array;
   fallen: Float32Array;
@@ -20,9 +22,11 @@ export interface Rules {
   surge: number;
   /** Share of the infected put down by the living each tick, scaled by how outnumbered they are. */
   resistance: number;
+  /** How much more the swarm prefers a road cell per road level. */
+  roadPull: number;
 }
 
-export const DEFAULT_RULES: Rules = { bite: 0.6, surge: 0.35, resistance: 0.05 };
+export const DEFAULT_RULES: Rules = { bite: 0.6, surge: 0.35, resistance: 0.05, roadPull: 2.5 };
 
 export function createWorld(width: number, height: number): World {
   const n = width * height;
@@ -30,6 +34,7 @@ export function createWorld(width: number, height: number): World {
     width,
     height,
     land: new Uint8Array(n).fill(1),
+    road: new Uint8Array(n),
     healthy: new Float32Array(n),
     infected: new Float32Array(n),
     fallen: new Float32Array(n),
@@ -62,7 +67,7 @@ export function rng(seed: number): () => number {
 
 /** Advance the world by one tick. Returns a new world; the old one is untouched. */
 export function step(w: World, rules: Rules = DEFAULT_RULES): World {
-  const { width, height, land } = w;
+  const { width, height, land, road } = w;
   const healthy = w.healthy.slice();
   const infected = w.infected.slice();
   const fallen = w.fallen.slice();
@@ -97,11 +102,11 @@ export function step(w: World, rules: Rules = DEFAULT_RULES): World {
       // Pull: weight each neighbour by how many living are there (plus a little wander).
       let sum = 0;
       const weights = open.map((j) => {
-        const wgt = healthy[j] + 1;
+        const wgt = (healthy[j] + 1) * (1 + road[j] * rules.roadPull);
         sum += wgt;
         return wgt;
       });
-      const leaving = z * rules.surge;
+      const leaving = z * Math.min(0.9, rules.surge * (1 + road[i] * 0.5));
       moved[i] -= leaving;
       open.forEach((j, k) => {
         moved[j] += (leaving * weights[k]) / sum;
@@ -110,5 +115,5 @@ export function step(w: World, rules: Rules = DEFAULT_RULES): World {
   }
   for (let i = 0; i < infected.length; i++) infected[i] = Math.max(0, infected[i] + moved[i]);
 
-  return { width, height, land, healthy, infected, fallen };
+  return { width, height, land, road, healthy, infected, fallen };
 }
