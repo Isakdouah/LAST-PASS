@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createWorld } from './outbreak';
-import { enterStreet, Kind, leaveStreet, stepStreet } from './street';
+import { enterStreet, Kind, leaveStreet, newAgent, stepStreet, Street } from './street';
 
 function block() {
   const w = createWorld(20, 20);
@@ -40,5 +40,37 @@ describe('street level', () => {
     const s = enterStreet(w, 0, 0, 20, 20, 10_000);
     for (let t = 0; t < 200; t++) stepStreet(s, w, t);
     expect(s.agents.every((a) => Math.floor(a.x) !== 5)).toBe(true);
+  });
+
+  it('armed people shoot the dead and use up ammo', () => {
+    const w = createWorld(10, 10);
+    const s: Street = { x0: 0, y0: 0, w: 10, h: 10, scale: 1, agents: [] };
+    s.agents.push(newAgent(5, 5, Kind.Living, 30));
+    for (let k = 0; k < 10; k++) s.agents.push(newAgent(5.6 + k * 0.05, 5, Kind.Dead));
+    for (let t = 0; t < 120; t++) stepStreet(s, w, t);
+    expect(s.agents.filter((a) => a.kind === Kind.Fallen).length).toBeGreaterThan(0);
+    expect(s.agents[0].ammo).toBeLessThan(30);
+  });
+
+  it('scared unarmed people run to someone armed', () => {
+    const w = createWorld(20, 20);
+    const s: Street = { x0: 0, y0: 0, w: 20, h: 20, scale: 1, agents: [] };
+    const guard = newAgent(8, 10, Kind.Living, 500);
+    const runner = newAgent(10, 10, Kind.Living);
+    s.agents.push(guard, runner, newAgent(11.2, 10, Kind.Dead));
+    const before = Math.abs(runner.x - guard.x);
+    for (let t = 0; t < 10; t++) stepStreet(s, w, t);
+    expect(Math.abs(runner.x - guard.x)).toBeLessThan(before);
+  });
+  it('keeps the armed share when one dot stands for many people', () => {
+    const w = createWorld(20, 20);
+    w.healthy.fill(10);
+    w.armed.fill(2);
+    w.ammo.fill(40);
+    const s = enterStreet(w, 0, 0, 20, 20, 200); // about 20 people per dot
+    const living = s.agents.filter((a) => a.kind === Kind.Living);
+    const armed = living.filter((a) => a.ammo > 0).length;
+    expect(armed / living.length).toBeGreaterThan(0.1);
+    expect(armed / living.length).toBeLessThan(0.3);
   });
 });

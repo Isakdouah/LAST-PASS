@@ -58,4 +58,26 @@ describe('outbreak simulation', () => {
     };
     expect(reach(a)).toBeGreaterThan(reach(b));
   });
+
+  it('an armed neighbourhood holds out longer, until the ammo runs low', () => {
+    const make = (guns: boolean) => {
+      const w = createWorld(10, 10);
+      w.healthy.fill(100);
+      if (guns) {
+        w.armed.fill(30);
+        w.ammo.fill(300);
+      }
+      w.infected[0] = 20;
+      return w;
+    };
+    let a = make(true);
+    let b = make(false);
+    for (let t = 0; t < 20; t++) {
+      a = step(a);
+      b = step(b);
+    }
+    expect(count(a.healthy)).toBeGreaterThan(count(b.healthy));
+    expect(count(a.ammo)).toBeLessThan(300 * 100);
+    expect(total(a)).toBeCloseTo(10 * 10 * 100 + 20, 0);
+  });
 });

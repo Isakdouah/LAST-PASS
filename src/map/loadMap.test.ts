@@ -25,4 +25,12 @@ describe('Twin Cities map', () => {
     expect(water).toBeGreaterThan(1000);
     expect(wetPeople).toBe(0);
   });
+
+  it('has police stations, fire stations and hospitals, and armed people', () => {
+    expect(city.places.filter((p) => p.kind === 'police').length).toBeGreaterThan(5);
+    expect(city.places.filter((p) => p.kind === 'hospital').length).toBeGreaterThan(5);
+    const armed = count(city.world.armed);
+    expect(armed).toBeGreaterThan(100_000);
+    expect(armed).toBeLessThan(250_000);
+  });
 });

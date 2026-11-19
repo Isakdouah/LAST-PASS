@@ -9,7 +9,25 @@ export interface MapFile {
   credit: string;
   layers: Record<'land' | 'roadMajor' | 'roadMinor' | 'bridge' | 'buildings', string>;
   population: string;
+  places: [number, number, string][];
 }
+
+export type PlaceKind = 'police' | 'fire' | 'hospital';
+export interface Place {
+  x: number;
+  y: number;
+  kind: PlaceKind;
+}
+
+/**
+ * Guesses, to tune later. Pew (June 2023 survey): 32% of US adults personally own a gun.
+ * Cities run lower than the national figure and children are counted in the population,
+ * so we start with about 1 in 5 people armed, each with a small home supply of ammo.
+ */
+export const ARMED_SHARE = 0.2;
+export const HOME_AMMO = 20;
+export const POLICE_OFFICERS = 40;
+export const POLICE_AMMO = 150;
 
 export interface CityMap {
   name: string;
@@ -19,6 +37,7 @@ export interface CityMap {
   roadMajor: Uint8Array;
   roadMinor: Uint8Array;
   buildings: Uint8Array;
+  places: Place[];
   world: World;
 }
 
@@ -40,6 +59,20 @@ export function loadMap(file: MapFile): CityMap {
   const minor = bytes(file.layers.roadMinor);
   const bridge = bytes(file.layers.bridge);
   for (let i = 0; i < world.road.length; i++) world.road[i] = major[i] || bridge[i] ? 3 : minor[i] ? 1 : 0;
+  for (let i = 0; i < world.healthy.length; i++) {
+    world.armed[i] = world.healthy[i] * ARMED_SHARE;
+    world.ammo[i] = world.armed[i] * HOME_AMMO;
+  }
+  const places: Place[] = (file.places ?? []).map(([x, y, kind]) => ({ x, y, kind: kind as PlaceKind }));
+  // Police stations: officers with far more ammunition, spread over the station and its block.
+  for (const p of places) {
+    if (p.kind !== 'police') continue;
+    const i = p.y * width + p.x;
+    if (!world.land[i]) continue;
+    world.healthy[i] += POLICE_OFFICERS;
+    world.armed[i] += POLICE_OFFICERS;
+    world.ammo[i] += POLICE_OFFICERS * POLICE_AMMO;
+  }
   return {
     name: file.name,
     credit: file.credit,
@@ -48,6 +81,7 @@ export function loadMap(file: MapFile): CityMap {
     roadMajor: bytes(file.layers.roadMajor),
     roadMinor: bytes(file.layers.roadMinor),
     buildings: bytes(file.layers.buildings),
+    places,
     world,
   };
 }

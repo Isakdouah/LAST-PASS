@@ -47,7 +47,16 @@ MINOR = {'secondary', 'tertiary', 'residential', 'unclassified', 'living_street'
 HOME = {'house', 'residential', 'apartments', 'detached', 'semidetached_house', 'terrace', 'yes', 'dormitory'}
 
 
+POI_TYPES = {'police': 'police', 'fire_station': 'fire', 'hospital': 'hospital'}
+pois = []  # (lon, lat, type)
+
+
 class Collector(osmium.SimpleHandler):
+    def node(self, n):
+        kind = POI_TYPES.get(n.tags.get('amenity'))
+        if kind and n.location.valid() and inside(n.location.lon, n.location.lat, 0):
+            pois.append((n.location.lon, n.location.lat, kind))
+
     def way(self, w):
         hw = w.tags.get('highway')
         ww = w.tags.get('waterway')
@@ -71,6 +80,16 @@ class Collector(osmium.SimpleHandler):
 
     def area(self, a):
         t = a.tags
+        kind = POI_TYPES.get(t.get('amenity'))
+        if kind:
+            for ring in a.outer_rings():
+                pts = [(n.lon, n.lat) for n in ring]
+                if pts:
+                    lon = sum(p[0] for p in pts) / len(pts)
+                    lat = sum(p[1] for p in pts) / len(pts)
+                    if inside(lon, lat, 0):
+                        pois.append((lon, lat, kind))
+                break
         is_water = t.get('natural') == 'water' or t.get('waterway') == 'riverbank' or t.get('water') is not None
         b = t.get('building')
         if not is_water and not b:
@@ -117,11 +136,12 @@ def main(src, out):
         'credit': '(c) OpenStreetMap contributors (ODbL)',
         'populationNote': f'Estimate: {TOTAL_POP} people spread over residential building area (guess, about 2009).',
         'layers': {k: enc(v) for k, v in layers.items()},
+        'places': sorted({(int(px(lo, la)[0] // SS), int(px(lo, la)[1] // SS), k) for lo, la, k in pois}),
         'population': enc(np.clip(np.round(pop), 0, 65535).astype('<u2').view(np.uint8)),
     }
     with open(out, 'w') as f:
         json.dump(data, f)
-    print('cells', GW * GH, 'land', int(land.sum()), 'pop', int(pop.sum()), 'max/cell', int(pop.max()))
+    print('places', len(data['places']), 'cells', GW * GH, 'land', int(land.sum()), 'pop', int(pop.sum()), 'max/cell', int(pop.max()))
 
 
 if __name__ == '__main__':

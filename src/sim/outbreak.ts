@@ -13,6 +13,10 @@ export interface World {
   healthy: Float32Array;
   infected: Float32Array;
   fallen: Float32Array;
+  /** How many of the healthy are armed (a subset of healthy). */
+  armed: Float32Array;
+  /** Rounds of ammunition held in the cell. */
+  ammo: Float32Array;
 }
 
 export interface Rules {
@@ -24,9 +28,13 @@ export interface Rules {
   resistance: number;
   /** How much more the swarm prefers a road cell per road level. */
   roadPull: number;
+  /** Shots fired per armed person per tick (while they have ammo). */
+  fireRate: number;
+  /** Share of shots that put one of the dead down. */
+  accuracy: number;
 }
 
-export const DEFAULT_RULES: Rules = { bite: 0.6, surge: 0.35, resistance: 0.05, roadPull: 2.5 };
+export const DEFAULT_RULES: Rules = { bite: 0.6, surge: 0.35, resistance: 0.05, roadPull: 2.5, fireRate: 0.5, accuracy: 0.3 };
 
 export function createWorld(width: number, height: number): World {
   const n = width * height;
@@ -38,6 +46,8 @@ export function createWorld(width: number, height: number): World {
     healthy: new Float32Array(n),
     infected: new Float32Array(n),
     fallen: new Float32Array(n),
+    armed: new Float32Array(n),
+    ammo: new Float32Array(n),
   };
 }
 
@@ -71,18 +81,29 @@ export function step(w: World, rules: Rules = DEFAULT_RULES): World {
   const healthy = w.healthy.slice();
   const infected = w.infected.slice();
   const fallen = w.fallen.slice();
+  const armed = w.armed.slice();
+  const ammo = w.ammo.slice();
 
-  // 1. Bites and losses inside each cell.
+  // 1. Fighting inside each cell: the armed shoot first, then the dead bite.
   for (let i = 0; i < healthy.length; i++) {
-    const h = healthy[i];
-    const z = infected[i];
+    let h = healthy[i];
+    let z = infected[i];
     if (z <= 0 || h <= 0) continue;
+    // Guns: shots limited by ammo; each hit puts one of the dead down.
+    const shots = Math.min(ammo[i], armed[i] * rules.fireRate);
+    const shotDown = Math.min(z, shots * rules.accuracy);
+    ammo[i] -= shots;
+    // Bare hands and tools: a small share of the dead put down.
+    const struck = Math.min(z - shotDown, (z - shotDown) * rules.resistance * (h / (h + z)));
+    z -= shotDown + struck;
+    fallen[i] += shotDown + struck;
+    // Bites: the fewer the dead after the shooting, the fewer bites.
     const contact = z / (h + z);
     const turned = Math.min(h, h * rules.bite * contact);
-    const putDown = Math.min(z, z * rules.resistance * (h / (h + z)));
-    healthy[i] = h - turned;
-    infected[i] = z + turned - putDown;
-    fallen[i] += putDown;
+    armed[i] *= h > 0 ? 1 - turned / h : 0;
+    h -= turned;
+    healthy[i] = h;
+    infected[i] = z + turned;
   }
 
   // 2. The swarm moves toward the living (4 neighbours, water blocks).
@@ -115,5 +136,5 @@ export function step(w: World, rules: Rules = DEFAULT_RULES): World {
   }
   for (let i = 0; i < infected.length; i++) infected[i] = Math.max(0, infected[i] + moved[i]);
 
-  return { width, height, land, road, healthy, infected, fallen };
+  return { width, height, land, road, healthy, infected, fallen, armed, ammo };
 }
