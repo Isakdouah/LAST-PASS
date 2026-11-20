@@ -119,16 +119,6 @@ function roads(): Uint8Array {
   }
   return (roadGrid = g);
 }
-/** How many floors the tallest building at a cell has (about 3.6 m a floor). */
-function floorsAt(x: number, y: number, fallback: number): number {
-  const s = det.buildings;
-  let h = 0;
-  for (let k = 0; k < s.count; k++) {
-    const cx = (s.box[k * 4] + s.box[k * 4 + 2]) / 2, cy = (s.box[k * 4 + 1] + s.box[k * 4 + 3]) / 2;
-    if (Math.abs(cx - x) < 1 && Math.abs(cy - y) < 1) h = Math.max(h, s.meta[k]);
-  }
-  return h > 0 ? Math.max(3, Math.min(12, Math.round(h / 3.6))) : fallback;
-}
 /** Can a car drive here? (On the road grid, about 10 m squares.) */
 export const onRoad = (x: number, y: number) => {
   const X = Math.floor(x * OCC), Y = Math.floor(y * OCC);
@@ -347,9 +337,10 @@ export class Session {
     this.rumours = createRumours();
     this.buildings = new Map();
     if (m === 'play') {
-      // Rosa: HCMC, fourth floor, east stairwell. Mai: Pioneer Hall, third floor.
-      this.buildings.set('rosa', createBuilding('rosa', 'HCMC, the Red Building', floorsAt(96.8, 121.8, 8), 140, 3, 3));
-      this.buildings.set('dorms', createBuilding('dorms', 'Pioneer Hall', floorsAt(128.5, 119.5, 4), 160, 2, 5));
+      // Rosa: HCMC, fifth floor, east stairwell (her third floor is gone). Mai: Pioneer Hall,
+      // third floor. Floor counts are guesses (OSM has no heights here); check real plans.
+      this.buildings.set('rosa', createBuilding('rosa', 'HCMC, the Red Building', 8, 140, 4, 3));
+      this.buildings.set('dorms', createBuilding('dorms', 'Pioneer Hall', 5, 160, 2, 5));
     }
     this.proof = false;
     this.seenGetUps = 0;

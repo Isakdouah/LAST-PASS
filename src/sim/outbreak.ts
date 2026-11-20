@@ -266,7 +266,7 @@ export function step(w0: World, rules: Rules = DEFAULT_RULES, env: Env = EVENING
       for (const j of nbrs(i, width, height, N)) if (land[j]) (nb += w0.aware[j]), k++;
       const heard = Math.min(1, near[i] / (2 + 0.02 * h)) * 0.6 + Math.min(1, w0.noise[i] / 4) * 0.5;
       const slow = 1 - 0.6 * sleep; // the asleep wake up later
-      let gain = heard * slow + 0.06 * (k ? nb / k - aware[i] : 0) + 0.004 * env.news * slow;
+      let gain = (heard + 0.04 * (k ? nb / k - aware[i] : 0) + 0.0035 * env.news) * slow;
       gain = Math.max(0, Math.min(1, gain));
       aware[i] = Math.min(1, aware[i] + (1 - aware[i]) * gain + guard[i] * 0.2 * (1 - aware[i]));
     }
