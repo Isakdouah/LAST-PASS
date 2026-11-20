@@ -4,7 +4,9 @@
 // Close up: sharper ground tiles and real extruded buildings near the camera only,
 // the simulated people as little figures, bullets as tracers, blood, fire and smoke.
 import * as THREE from 'three';
-import { det, GW, GH, CELL_X, CELL_Y, Session, places } from '../game/session';
+import { det, GW, GH, CELL_X, CELL_Y, Session, places, blocked } from '../game/session';
+import { CAR_COLOURS, SIZE, VEHICLE_SCALE, vehicleGeometry, VKind } from './vehicles';
+import { HEROES, routeCells, escapeAt } from '../game/heroes';
 import { query, Shapes, TILE } from '../map/detail';
 import { Kind, Role, Street } from '../sim/street';
 
@@ -175,7 +177,107 @@ interface Tile {
   key: number;
   ground: THREE.Mesh;
   bld: THREE.Mesh | null;
+  cars: THREE.Mesh | null;
   used: number;
+}
+const vehicleMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true });
+const shadowMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.45, depthWrite: false, depthTest: false });
+
+export interface CarSpot {
+  x: number; // map cells
+  y: number;
+  angle: number; // radians about the up axis (model faces +z)
+  kind: VKind;
+  colour: number;
+}
+/** Where parked cars stand along the kerbs of ordinary streets in a tile (not on freeways).
+ *  A car is only placed if its whole footprint is clear of buildings (see vehicles.test.ts). */
+export function parkedCarSpots(x0: number, y0: number): CarSpot[] {
+  const s = det.roads;
+  const out: CarSpot[] = [];
+  for (const k of query(s, x0, y0, x0 + TILE, y0 + TILE)) {
+    const wm = s.meta[k];
+    if (wm < 7 || wm >= 15) continue;
+    const o = s.off[k], n = s.off[k + 1] - o;
+    for (let j = 0; j + 1 < n; j++) {
+      const ax = s.xy[(o + j) * 2], ay = s.xy[(o + j) * 2 + 1];
+      const bx = s.xy[(o + j + 1) * 2], by = s.xy[(o + j + 1) * 2 + 1];
+      const lx = (bx - ax) * CELL_X, ly = (by - ay) * CELL_Y;
+      const len = Math.hypot(lx, ly);
+      if (len < 10) continue;
+      const ux = lx / len, uy = ly / len;
+      for (let d = 6; d < len - 6; d += 8.5) {
+        for (const side of [-1, 1]) {
+          const h = hash(k * 131 + j * 17 + Math.floor(d) * 7 + (side > 0 ? 3 : 0));
+          if (h > 0.32) continue;
+          const off = (wm / 2 - 1.3) * side;
+          const cx = ax + (ux * d - uy * off) / CELL_X, cy = ay + (uy * d + ux * off) / CELL_Y;
+          if (cx < x0 || cy < y0 || cx >= x0 + TILE || cy >= y0 + TILE) continue;
+          const kind: VKind = h < 0.05 ? 'pickup' : 'car';
+          const hl = (SIZE[kind].l * VEHICLE_SCALE) / 2, hw = (SIZE[kind].w * VEHICLE_SCALE) / 2;
+          let clear = true;
+          for (const [a, b] of [[hl, hw], [hl, -hw], [-hl, hw], [-hl, -hw], [0, 0]])
+            if (blocked(cx + (ux * a - uy * b) / CELL_X, cy + (uy * a + ux * b) / CELL_Y)) clear = false;
+          if (!clear) continue;
+          out.push({ x: cx, y: cy, angle: Math.atan2(ux, uy) + (h < 0.16 ? Math.PI : 0), kind, colour: CAR_COLOURS[Math.floor(hash(k * 3 + j * 11 + d) * CAR_COLOURS.length)] });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+const carCache = new Map<string, THREE.BufferGeometry>();
+/** Parked cars for a tile, merged into one mesh with their shadows. */
+function parkedCars(x0: number, y0: number): THREE.BufferGeometry | null {
+  const spots = parkedCarSpots(x0, y0);
+  if (!spots.length) return null;
+  const list: THREE.BufferGeometry[] = [];
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3(VEHICLE_SCALE, VEHICLE_SCALE, VEHICLE_SCALE);
+  const y = new THREE.Vector3(0, 1, 0), one = new THREE.Vector3(1, 1, 1);
+  const shadow = new THREE.PlaneGeometry(SIZE.car.w * VEHICLE_SCALE * 1.15, SIZE.car.l * VEHICLE_SCALE * 1.05);
+  shadow.rotateX(-Math.PI / 2);
+  shadow.deleteAttribute('uv');
+  shadow.deleteAttribute('normal');
+  shadow.setAttribute('color', new THREE.BufferAttribute(new Float32Array(shadow.attributes.position.count * 3).fill(0.02), 3));
+  for (const c of spots) {
+    q.setFromAxisAngle(y, c.angle);
+    cellToLocal(c.x, c.y, p);
+    const sh = shadow.clone();
+    m.compose(new THREE.Vector3(p.x + 0.6, 0.04, p.z + 0.6), q, one);
+    sh.applyMatrix4(m);
+    list.unshift(sh);
+    const key = c.kind + c.colour;
+    if (!carCache.has(key)) carCache.set(key, vehicleGeometry(c.kind, c.colour));
+    const g = carCache.get(key)!.clone();
+    m.compose(p, q, sc);
+    g.applyMatrix4(m);
+    list.push(g);
+  }
+  return mergeColoured(list);
+}
+
+function mergeColoured(list: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  let nv = 0, ni = 0;
+  for (const g of list) (nv += g.attributes.position.count), (ni += g.index ? g.index.count : g.attributes.position.count);
+  const P = new Float32Array(nv * 3), C = new Float32Array(nv * 3), I = new Uint32Array(ni);
+  let v = 0, i = 0;
+  for (const g of list) {
+    const p = g.attributes.position as THREE.BufferAttribute, c = g.attributes.color as THREE.BufferAttribute;
+    for (let k = 0; k < p.count; k++) {
+      P.set([p.getX(k), p.getY(k), p.getZ(k)], (v + k) * 3);
+      C.set([c.getX(k), c.getY(k), c.getZ(k)], (v + k) * 3);
+    }
+    if (g.index) for (let k = 0; k < g.index.count; k++) I[i++] = v + g.index.getX(k);
+    else for (let k = 0; k < p.count; k++) I[i++] = v + k;
+    v += p.count;
+    g.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(P, 3));
+  out.setAttribute('color', new THREE.BufferAttribute(C, 3));
+  out.setIndex(new THREE.BufferAttribute(I, 1));
+  return out;
 }
 
 /** Thermal camera: the living glow, the dead are as cold as the street. */
@@ -201,6 +303,13 @@ export class CityLayer {
   private tiles = new Map<number, Tile>();
   private frameNo = 0;
   private agents: THREE.InstancedMesh;
+  private agentsB: THREE.InstancedMesh;
+  private shadows: THREE.InstancedMesh;
+  private heroVeh = new Map<string, THREE.Mesh>();
+  private heroFig = new Map<string, THREE.Mesh>();
+  private selBox: THREE.LineSegments;
+  /** The hero whose ID card is open (gets a thin box round them). */
+  selected = '';
   private blood: THREE.InstancedMesh;
   private tracers: THREE.LineSegments;
   private pts: THREE.Points;
@@ -251,14 +360,45 @@ export class CityLayer {
     // ground first (no depth), then buildings, people, tracers, smoke.
     this.bldMat = new THREE.ShaderMaterial({ vertexShader: BLD_V, fragmentShader: BLD_F, uniforms: this.shared, transparent: true });
     // People: a little figure (body + head), lit from above by vertex shading.
-    const fig = figureGeometry();
-    this.agents = new THREE.InstancedMesh(fig, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), 2600);
-    this.agents.renderOrder = 1;
-    this.agents.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.agents.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(2600 * 3), 3);
-    this.agents.frustumCulled = false;
-    this.agents.count = 0;
-    this.scene.add(this.agents);
+    const mk = (geo: THREE.BufferGeometry) => {
+      const im = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), 2600);
+      im.renderOrder = 1;
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(2600 * 3), 3);
+      im.frustumCulled = false;
+      im.count = 0;
+      this.scene.add(im);
+      return im;
+    };
+    // Two poses, mid-step one way and the other: walkers flip between them.
+    this.agents = mk(figureGeometry(1));
+    this.agentsB = mk(figureGeometry(-1));
+    const sg = new THREE.CircleGeometry(0.42, 8);
+    sg.rotateX(-Math.PI / 2);
+    this.shadows = new THREE.InstancedMesh(sg, shadowMat, 2600);
+    this.shadows.renderOrder = -4;
+    this.shadows.frustumCulled = false;
+    this.shadows.count = 0;
+    this.scene.add(this.shadows);
+    // Heroes: their vehicle and themselves, and a thin selection box.
+    for (const h of HEROES) {
+      const v = new THREE.Mesh(vehicleGeometry(h.vehicle.kind, h.vehicle.colour), vehicleMat);
+      v.scale.setScalar(VEHICLE_SCALE);
+      v.renderOrder = 0.6;
+      v.visible = false;
+      this.scene.add(v);
+      this.heroVeh.set(h.id, v);
+      const f = new THREE.Mesh(figureGeometry(0), new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, color: 0xffe08a }));
+      f.scale.setScalar(2.0);
+      f.renderOrder = 1;
+      f.visible = false;
+      this.scene.add(f);
+      this.heroFig.set(h.id, f);
+    }
+    this.selBox = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color: 0xffd640, transparent: true, depthTest: false }));
+    this.selBox.renderOrder = 6;
+    this.selBox.visible = false;
+    this.scene.add(this.selBox);
     const bg = new THREE.CircleGeometry(1, 6);
     bg.rotateX(-Math.PI / 2);
     this.blood = new THREE.InstancedMesh(bg, new THREE.MeshBasicMaterial({ color: 0x5a0e10, depthWrite: false, depthTest: false }), 4000);
@@ -370,14 +510,73 @@ export class CityLayer {
       const vis = want.has(key);
       tile.ground.visible = wantGround.has(key);
       if (tile.bld) tile.bld.visible = vis;
+      if (tile.cars) tile.cars.visible = vis && d < 3;
       (tile.ground.material as THREE.ShaderMaterial).uniforms.dots.value = dots;
       (tile.ground.material as THREE.ShaderMaterial).uniforms.alpha.value = this.alpha;
       if (!vis && this.frameNo - tile.used > 600) this.dropTile(tile);
     }
     this.updateStreet(s.street, time);
+    this.updateHeroes(s, d, time);
     this.updatePoints(s, look, d, time);
     this.ptsMat.uniforms.scale.value = screenH / (2 * Math.tan(THREE.MathUtils.degToRad(fovDeg) / 2));
     void camLocal;
+  }
+
+  /** Where a hero is right now (local metres), for clicking and labels. null = not drawn. */
+  heroPos(id: string): THREE.Vector3 | null {
+    const f = this.heroFig.get(id), v = this.heroVeh.get(id);
+    if (f && f.visible) return f.position.clone().setY(2);
+    if (v && v.visible) return v.position.clone().setY(2);
+    return null;
+  }
+
+  private updateHeroes(s: Session, d: number, time: number) {
+    const close = d < 4 && this.alpha > 0.3;
+    const y = new THREE.Vector3(0, 1, 0);
+    let sel: THREE.Object3D | null = null;
+    for (const h of HEROES) {
+      const hs = s.heroState(h.id);
+      const v = this.heroVeh.get(h.id)!, f = this.heroFig.get(h.id)!;
+      if (!hs || !close) {
+        v.visible = f.visible = false;
+        continue;
+      }
+      const route = routeCells(h);
+      let at: { x: number; y: number; face: number };
+      if (hs.escapeStart >= 0) at = escapeAt(h, (s.tick - hs.escapeStart) * 60 + s.acc);
+      else at = { x: route[0].x, y: route[0].y, face: Math.atan2(route[1].y - route[0].y, route[1].x - route[0].x) };
+      cellToLocal(at.x, at.y, v.position);
+      // Model faces +z (south); route angle is from +x (east) toward +y (south).
+      v.quaternion.setFromAxisAngle(y, Math.PI / 2 - at.face);
+      // Mai has no vehicle until the stranger's pickup stops for her.
+      v.visible = !(h.id === 'dorms' && hs.escapeStart < 0);
+      const onRoad = hs.escapeStart >= 0 && !hs.arrived;
+      f.visible = !hs.dead && !onRoad;
+      if (f.visible) {
+        // Stand beside the vehicle door (or on the spot).
+        const side = new THREE.Vector3(1, 0, 0).applyQuaternion(v.quaternion).multiplyScalar(v.visible ? 2.6 : 0);
+        f.position.copy(v.position).add(side);
+        f.quaternion.copy(v.quaternion);
+        f.position.y = Math.abs(Math.sin(time * 2)) * 0.05;
+      }
+      if (this.thermal) (f.material as THREE.MeshBasicMaterial).color.setRGB(1, 1, 0.95);
+      else (f.material as THREE.MeshBasicMaterial).color.setHex(0xffe08a);
+      if (h.id === this.selected) sel = f.visible ? f : v.visible ? v : null;
+    }
+    // The selection box: thin, round the hero (or their vehicle on the road).
+    this.selBox.visible = !!sel;
+    if (sel) {
+      const b = new THREE.Box3().setFromObject(sel);
+      if (sel === this.heroFig.get(this.selected)) {
+        const veh = this.heroVeh.get(this.selected)!;
+        if (veh.visible) b.union(new THREE.Box3().setFromObject(veh));
+      }
+      b.expandByScalar(1.2);
+      b.getCenter(this.selBox.position);
+      b.getSize(this.selBox.scale);
+      this.selBox.quaternion.identity();
+      (this.selBox.material as THREE.LineBasicMaterial).opacity = 0.65 + 0.35 * Math.sin(time * 4);
+    }
   }
 
   private buildTile(key: number): Tile {
@@ -404,7 +603,14 @@ export class CityLayer {
       bld.renderOrder = 0;
       this.scene.add(bld);
     }
-    const tile = { key, ground, bld, used: this.frameNo };
+    const cg = parkedCars(x0, y0);
+    let cars: THREE.Mesh | null = null;
+    if (cg) {
+      cars = new THREE.Mesh(cg, vehicleMat);
+      cars.renderOrder = 0.5;
+      this.scene.add(cars);
+    }
+    const tile = { key, ground, bld, cars, used: this.frameNo };
     this.tiles.set(key, tile);
     return tile;
   }
@@ -419,25 +625,33 @@ export class CityLayer {
       this.scene.remove(t.bld);
       t.bld.geometry.dispose();
     }
+    if (t.cars) {
+      this.scene.remove(t.cars);
+      t.cars.geometry.dispose();
+    }
     this.tiles.delete(t.key);
   }
 
   private updateStreet(st: Street | null, time: number) {
-    const A = this.agents;
+    const A = this.agents, A2 = this.agentsB, SH = this.shadows;
     if (!st) {
       A.count = 0;
+      A2.count = 0;
+      SH.count = 0;
       this.blood.count = 0;
       (this.tracers.geometry as THREE.BufferGeometry).setDrawRange(0, 0);
       return;
     }
     const FIG = 2.0; // people drawn bigger than life, so you can read them
-    let n = 0;
+    let n = 0, n2 = 0, ns = 0;
     const m = this.tmpM, q = this.tmpQ, p = this.tmpV, sc = this.tmpS;
+    const one = new THREE.Vector3(1, 1, 1), sp = new THREE.Vector3(), q0 = new THREE.Quaternion();
     const yAxis = new THREE.Vector3(0, 1, 0), xAxis = new THREE.Vector3(1, 0, 0);
-    for (let k = 0; k < st.agents.length && n < 2600; k++) {
+    for (let k = 0; k < st.agents.length && n + n2 < 2600; k++) {
       const a = st.agents[k];
       cellToLocal(a.x, a.y, p);
       let c = COL.living;
+      let flip = false;
       if (a.kind === Kind.Fallen) {
         q.setFromAxisAngle(yAxis, a.face);
         q.multiply(new THREE.Quaternion().setFromAxisAngle(xAxis, Math.PI / 2));
@@ -447,7 +661,14 @@ export class CityLayer {
         // Face where they are going (sim angles: x east, y south, same as our x and z).
         q.setFromAxisAngle(yAxis, -a.face + Math.PI / 2);
         const moving = Math.hypot(a.vx, a.vy) > 0.0001;
-        p.y = moving ? Math.abs(Math.sin(time * 14 + k)) * 0.25 : 0;
+        p.y = moving ? Math.abs(Math.sin(time * 14 + k)) * 0.12 : 0;
+        // Walkers alternate between the two stride poses; the dead run faster and wilder.
+        flip = moving && Math.floor(time * (a.kind === Kind.Dead ? 9 : 6) + hash(k) * 2) % 2 === 1;
+        if (ns < 2600) {
+          sp.set(p.x + 0.5, 0.03, p.z + 0.5);
+          m.compose(sp, q0, one.set(FIG * 0.9, 1, FIG * 0.9));
+          SH.setMatrixAt(ns++, m);
+        }
         if (a.kind === Kind.Dead) c = COL.dead;
         else if (a.role === Role.Police) c = COL.police;
         else if (a.armed && a.ammo > 0) c = COL.armed;
@@ -456,13 +677,23 @@ export class CityLayer {
       if (this.thermal) c = a.kind === Kind.Living ? THERM.warm : a.kind === Kind.Dead ? THERM.cold : THERM.cool;
       sc.set(FIG, FIG, FIG);
       m.compose(p, q, sc);
-      A.setMatrixAt(n, m);
-      A.setColorAt(n, c);
-      n++;
+      if (flip) {
+        A2.setMatrixAt(n2, m);
+        A2.setColorAt(n2, c);
+        n2++;
+      } else {
+        A.setMatrixAt(n, m);
+        A.setColorAt(n, c);
+        n++;
+      }
     }
-    A.count = n;
-    A.instanceMatrix.needsUpdate = true;
-    if (A.instanceColor) A.instanceColor.needsUpdate = true;
+    for (const M of [A, A2]) {
+      M.count = M === A ? n : n2;
+      M.instanceMatrix.needsUpdate = true;
+      if (M.instanceColor) M.instanceColor.needsUpdate = true;
+    }
+    SH.count = ns;
+    SH.instanceMatrix.needsUpdate = true;
     // Blood on the ground.
     const B = this.blood;
     const nb = Math.min(4000, st.blood.length);
@@ -750,25 +981,31 @@ function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.BufferGeomet
   return g;
 }
 
-/** A blocky person, 1.8 m: legs, body, head; vertex colours give simple top light. */
-function figureGeometry(): THREE.BufferGeometry {
+/** A blocky person, 1.8 m: legs, arms, body, head; vertex colours give simple top light.
+ *  stride 0 = standing, +1 / -1 = mid-step (legs and arms swing opposite ways). */
+function figureGeometry(stride = 0): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
-  const box = (w: number, h: number, d: number, y: number, x = 0) => {
+  const box = (w: number, h: number, d: number, y: number, x = 0, z = 0, tilt = 0) => {
     const b = new THREE.BoxGeometry(w, h, d);
-    b.translate(x, y, 0);
+    b.translate(0, -h / 2, 0); // swing from the top (hip or shoulder)
+    if (tilt) b.rotateX(tilt);
+    b.translate(x, y + h, z);
     parts.push(b);
   };
-  box(0.24, 0.8, 0.26, 0.4, -0.15); // legs
-  box(0.24, 0.8, 0.26, 0.4, 0.15);
-  box(0.62, 0.68, 0.36, 1.12); // body
-  box(0.34, 0.32, 0.34, 1.62); // head
+  const a = stride * 0.45;
+  box(0.22, 0.82, 0.24, 0.0, -0.13, 0, a); // legs
+  box(0.22, 0.82, 0.24, 0.0, 0.13, 0, -a);
+  box(0.56, 0.66, 0.32, 0.8); // body
+  box(0.14, 0.62, 0.16, 0.84, -0.36, 0, -a * 0.8); // arms
+  box(0.14, 0.62, 0.16, 0.84, 0.36, 0, a * 0.8);
+  box(0.3, 0.3, 0.3, 1.47); // head
   const merged = mergeGeoms(parts);
   const n = merged.attributes.normal as THREE.BufferAttribute;
   const p = merged.attributes.position as THREE.BufferAttribute;
   const c = new Float32Array(n.count * 3);
   for (let i = 0; i < n.count; i++) {
     const shade = n.getY(i) > 0.5 ? 1.0 : n.getY(i) < -0.5 ? 0.4 : 0.62 + 0.12 * n.getX(i);
-    const legs = p.getY(i) < 0.8 ? 0.7 : 1;
+    const legs = p.getY(i) < 0.8 ? 0.62 : 1;
     c.set([shade * legs, shade * legs, shade * legs], i * 3);
   }
   merged.setAttribute('color', new THREE.BufferAttribute(c, 3));

@@ -5,7 +5,7 @@
 import './ui/hud.css';
 import * as THREE from 'three';
 import { Sound } from './audio';
-import { fmt, inWindow, MPLS, realSeconds, subPoint, untilWindow, passIndex } from './game/clock';
+import { fmt, inWindow, localTime, MPLS, realSeconds, subPoint, untilWindow, passIndex } from './game/clock';
 import { tuned } from './game/radio';
 import { Box, GH, GW, Mode, places, Session, CELL_X } from './game/session';
 import { Pixel } from './engine/pixel';
@@ -15,6 +15,10 @@ import { buildCupola, buildStation, drawLaptop, drawRadio } from './engine/stati
 import { arcKm, ALT_ISS, ecef, enu, FOOTPRINT_KM, latLonOf, R_EARTH, station, sunDir } from './engine/geo';
 import { blendPose, Frame, lookQuat, newPose, Pose, Telescope, TELE } from './engine/views';
 import { Hud, esc } from './ui/hud';
+import { WorldFx } from './engine/worldfx';
+import { darkness } from './game/world';
+import { HEROES, heroById, routeCells as routeCellsOf, escapeAt as escapeAtOf, seenAs } from './game/heroes';
+import { cardHtml, drawPortrait } from './ui/card';
 
 const canvas = document.getElementById('screen') as HTMLCanvasElement;
 const px = new Pixel(canvas);
@@ -26,6 +30,8 @@ game.say = (who, text, secs) => hud.say(who, text, secs);
 // ---------- scenes ----------
 const globe = new Globe();
 const city = new CityLayer();
+const worldFx = new WorldFx();
+globe.scene.add(worldFx.group);
 const stationScene = new THREE.Scene();
 const iss = buildStation();
 const cup = buildCupola();
@@ -157,6 +163,58 @@ function pickCell(sx: number, sy: number) {
 }
 
 // ---------- input ----------
+// ---------- hero ID cards ----------
+const cardEl = document.createElement('div');
+cardEl.id = 'card';
+document.body.appendChild(cardEl);
+const portraits = new Map<string, string>();
+let cardId = '';
+let cardShown = 0;
+function portraitUrl(id: string, known: boolean) {
+  const key = id + (known ? '+' : '-');
+  if (!portraits.has(key)) portraits.set(key, drawPortrait(heroById(id)!.portrait, known).toDataURL());
+  return portraits.get(key)!;
+}
+function renderCard() {
+  const h = heroById(cardId), st = game.heroState(cardId);
+  if (!h || !st) return;
+  const gr = game.radio.groups.find((g) => g.id === cardId);
+  cardEl.innerHTML = cardHtml(h, st, gr, portraitUrl(cardId, !!gr && gr.known));
+  cardEl.querySelector('.close')?.addEventListener('click', closeCard);
+  cardShown = performance.now();
+}
+function openCard(id: string) {
+  const st = game.heroState(id);
+  if (!st) return;
+  if (!st.seen) {
+    st.seen = true;
+    st.log.push({ t: game.t, text: `${localTime(game.t)} Pass ${passIndex(game.t) + 1}: seen from orbit: ${seenAs(heroById(id)!, st)}.` });
+  }
+  cardId = id;
+  city.selected = id;
+  cardEl.classList.add('open');
+  renderCard();
+}
+function closeCard() {
+  cardId = '';
+  city.selected = '';
+  cardEl.classList.remove('open');
+}
+/** The hero under the mouse (within 40 px), if any. */
+function heroAt(sx: number, sy: number): string {
+  let best = '', bd = 40;
+  for (const h of HEROES) {
+    const p = city.heroPos(h.id);
+    if (!p) continue;
+    const q = p.project(camCity);
+    if (q.z > 1) continue;
+    const x = ((q.x + 1) / 2) * window.innerWidth, y = ((1 - q.y) / 2) * window.innerHeight;
+    const d = Math.hypot(x - sx, y - sy);
+    if (d < bd) (bd = d), (best = h.id);
+  }
+  return best;
+}
+
 let mode: Mode | 'name' = 'title';
 let drag: { x: number; y: number; moved: boolean; button: number } | null = null;
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -183,6 +241,15 @@ window.addEventListener('mousemove', (e) => {
   }
 });
 window.addEventListener('mouseup', (e) => {
+  if (drag && !drag.moved && (mode === 'play' || mode === 'sandbox') && view === 'tele' && drag.button === 0) {
+    const id = game.canLook() && tele.d < 4 ? heroAt(e.clientX, e.clientY) : '';
+    if (id) {
+      openCard(id);
+      drag = null;
+      return;
+    }
+    if (cardId) closeCard();
+  }
   if (drag && !drag.moved && mode === 'sandbox' && view === 'tele') {
     const c = pickCell(e.clientX, e.clientY);
     if (c && c.x >= 0 && c.y >= 0 && c.x < GW && c.y < GH) game.seed(c.x, c.y, 25);
@@ -241,7 +308,7 @@ window.addEventListener('keydown', (e) => {
     if (k === 'Escape') toTitle();
     return;
   }
-  if (k === 'Escape') return toTitle();
+  if (k === 'Escape') return cardId ? closeCard() : toTitle();
   if (k === '1') setView('cupola');
   if (k === '2') setView('outside');
   if (k === '3') setView('tele');
@@ -450,11 +517,20 @@ function frame(now: number) {
   const sun = sunDir(game.t);
   globe.update(sun, s.up, Math.cos(FOOTPRINT_KM / R_EARTH), pose.pos, game.t);
   // Minneapolis on the night-lights map follows the simulation: lights go out as it falls.
-  const lightsKey = Math.round(darkShare() * 20);
+  // Elsewhere the scripted outbreaks put the lights out (redrawn every 15 game minutes).
+  const mplsDark = Math.round(darkShare() * 20);
+  const lightsKey = mplsDark + 100 * Math.floor(game.t / 900);
   if (lightsKey !== lastLights) {
     lastLights = lightsKey;
-    globe.drawLights((k) => (Math.abs(cityLL[k * 2] - MPLS.lat) < 0.4 && Math.abs(cityLL[k * 2 + 1] - MPLS.lon) < 0.6 ? 1 - lightsKey / 20 : 1));
+    const ll = { lat: 0, lon: 0 };
+    globe.drawLights((k) => {
+      ll.lat = cityLL[k * 2];
+      ll.lon = cityLL[k * 2 + 1];
+      if (Math.abs(ll.lat - MPLS.lat) < 0.4 && Math.abs(ll.lon - MPLS.lon) < 0.6) return 1 - mplsDark / 20;
+      return 1 - darkness(ll, game.t);
+    });
   }
+  worldFx.update(game.t, time, camAlt);
   {
     const pa = trackGeo.attributes.position as THREE.BufferAttribute;
     for (let k = 0; k < 240; k++) {
@@ -521,6 +597,7 @@ function frame(now: number) {
     hud.update(game, { view, viewText: viewText(), hint: hintText(), keys: keysText(), name: playerName });
   }
   hud.endLabels();
+  if (cardId && now - cardShown > 500) renderCard();
   cpuAvg = cpuAvg * 0.95 + (performance.now() - cpu0) * 0.05;
   requestAnimationFrame(frame);
 }
@@ -580,7 +657,7 @@ function viewText() {
 function keysText() {
   const v = (x: View, k: string, n: string) => `<span class="${view === x ? 'mark' : ''}">${k} ${n}</span>`;
   let h = `${v('cupola', '1', 'Cupola')} &nbsp;${v('outside', '2', 'Outside')} &nbsp;${v('tele', '3', 'Telescope')}<br>`;
-  if (view === 'tele') h += 'Wheel zoom · drag move · right-drag turn · F station · G Minneapolis<br>';
+  if (view === 'tele') h += 'Wheel zoom · drag move · right-drag turn · F station · G Minneapolis · click a hero for their card<br>';
   else if (view === 'cupola') h += 'Drag to look around · wheel in: telescope<br>';
   else h += 'Drag to circle the station · wheel zoom<br>';
   h += 'Arrows tune · W warn · P patch · T thermal · Space pause';
@@ -632,7 +709,9 @@ function drawLabels() {
     }
     for (const g of game.radio.groups) {
       if (!g.known || g.kind === 'broadcast' || g.kind === 'police') continue;
-      cellToLocal(g.x, g.y, v, 12);
+      const hp = city.heroPos(g.id);
+      if (hp) v.copy(hp).setY(12);
+      else cellToLocal(g.x, g.y, v, 12);
       const p = toScreen(v, camCity);
       if (p && p.x > 0 && p.x < W && p.y > 0 && p.y < H) hud.label(p.x, p.y, `◆ ${g.name}`, 'contact');
     }
@@ -654,6 +733,16 @@ requestAnimationFrame(frame);
   },
   start: (m: 'play' | 'sandbox') => start(m),
   fps: () => fps,
+  openCard,
+  closeCard,
+  clearSay: () => hud.clearSay(),
+  city,
+  heroCell: (id: string) => {
+    const h = heroById(id)!;
+    const st = game.heroState(id)!;
+    const r = routeCellsOf(h);
+    return st.escapeStart >= 0 ? escapeAtOf(h, (game.tick - st.escapeStart) * 60) : r[0];
+  },
   /** Average time per frame spent in our own code (ms), without the graphics card. */
   cpu: () => cpuAvg,
   jump: (seconds: number) => {

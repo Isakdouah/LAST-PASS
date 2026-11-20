@@ -74,7 +74,7 @@ export function createRadio(): Radio {
       g('walt', 'Walt, ham radio', 'Walt Lindqvist', 'star', cell(-93.256, 44.9405), 146.52, 0.55, 0.8, 0.9),
       g('abdi', 'Abdi, bus 21', 'Abdi Warsame', 'bus', cell(-93.2875, 44.986), 147.0, 0.3, 0.95, 1.1),
       // Others you can find.
-      g('dorms', 'U of M dorms', 'a student', 'civil', { x: 128.5, y: 119.5 }, 151.82, 0.35, 1.2, 1.15),
+      g('dorms', 'Mai, U of M dorms', 'Mai Vang', 'civil', { x: 128.5, y: 119.5 }, 151.82, 0.35, 1.2, 1.15),
       g('p1', 'MPD 1st Precinct', 'Sgt. Hale', 'police', { x: 88.6, y: 122.8 }, 155.37, 0.15, 0.85, 1.0),
       g('p3', 'MPD 3rd Precinct', 'Lt. Okafor', 'police', cell(-93.2326, 44.9486), 155.61, 0.15, 0.9, 1.0),
       g('p5', 'MPD 5th Precinct', 'Officer Berg', 'police', { x: 82.4, y: 155.6 }, 155.85, 0.15, 1.0, 1.05),
@@ -168,6 +168,14 @@ const STAR: Record<string, string[]> = {
     'Last run. Then I walk.',
   ],
 };
+STAR.dorms = [
+  "okay okay okay. Is this... someone said this channel reaches the space station? That's insane. This is Mai, Pioneer Hall, third floor.",
+  'We pushed the vending machines against the stairwell doors. There are maybe thirty of us. Nobody from the university is answering.',
+  "My family's in Frogtown. My grandma doesn't pick up. I just want to know if the roads east are open.",
+  "okay okay okay. There's a guy here, Danny, his mom's a nurse downtown. Have you heard anything from the hospital?",
+  "Phones are dead. My battery's at one bar. I'm saving it for you.",
+  "If you see a way out, tell me. I'm not staying in this building another night.",
+];
 const NOAA = [
   'This is the National Weather Service. A health advisory is in effect for Hennepin County. Residents should stay indoors and avoid emergency rooms unless necessary.',
   'Officials report the situation is under control. Do not call 9-1-1 except for life-threatening emergencies.',

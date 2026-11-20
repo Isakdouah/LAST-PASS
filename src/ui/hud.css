@@ -59,3 +59,49 @@ html, body { margin: 0; height: 100%; background: #04050a; overflow: hidden; }
 }
 #screenText .small { font-size: 14px; line-height: 20px; }
 #eyepiece { position: fixed; inset: 0; pointer-events: none; }
+
+/* Hero ID card (PLACEHOLDER designs: our own lookalikes, made-up numbers, no real seals). */
+#card { position: fixed; right: 16px; top: 112px; width: 500px; max-width: calc(100vw - 32px); max-height: calc(100vh - 128px); overflow: auto;
+  font-family: 'Pixelify Sans', monospace; pointer-events: auto; z-index: 20; display: none; -webkit-font-smoothing: none; }
+#card.open { display: block; }
+#card .idcard { position: relative; border-radius: 14px; overflow: hidden; color: #1a1c24; background: #e8ecf0; box-shadow: 0 0 0 2px #0a0c14, 6px 8px 0 rgba(0,0,0,0.6); }
+#card .band { padding: 8px 14px; font-size: 22px; line-height: 24px; font-weight: 700; letter-spacing: 1px; color: #fff; display: flex; justify-content: space-between; align-items: baseline; }
+#card .band span { font-size: 14px; font-weight: 400; letter-spacing: 0; }
+#card .body { display: flex; gap: 14px; padding: 12px 14px 8px; }
+#card .photo { position: relative; width: 120px; height: 156px; flex: none; border: 2px solid #3a4050; }
+#card .photo img { width: 120px; height: 156px; image-rendering: pixelated; display: block; }
+#card .stamp { position: absolute; left: -8px; right: -8px; bottom: 18px; transform: rotate(-12deg); text-align: center; font-size: 13px; font-weight: 700; padding: 2px 0;
+  border: 2px solid currentColor; background: rgba(240, 236, 226, 0.75); }
+#card .stamp.alive { color: #2a6a2a; }
+#card .stamp.attack { color: #c8641e; }
+#card .stamp.road { color: #2a4a9a; }
+#card .stamp.out { color: #2a6a2a; }
+#card .stamp.lost { color: #a01a14; }
+#card .fields { flex: 1; min-width: 0; font-size: 13px; line-height: 16px; }
+#card .name { font-size: 20px; line-height: 24px; font-weight: 700; margin-bottom: 4px; }
+#card .f { margin: 2px 0; }
+#card .f i { font-style: normal; color: #6a2020; font-size: 11px; margin-right: 6px; }
+#card .f b { font-weight: 400; }
+#card .row { display: flex; gap: 12px; }
+#card .foot { padding: 4px 14px 10px; font-size: 11px; color: #4a5060; display: flex; justify-content: space-between; align-items: end; }
+#card .sig { font-family: 'Brush Script MT', cursive; font-size: 22px; color: #1a2a5a; }
+#card .redact { display: inline-block; background: #14161e; color: transparent; line-height: 11px; height: 11px; vertical-align: -1px; }
+/* Per card type. */
+#card .license .band { background: #1e3a6e; }
+#card .license { background: repeating-linear-gradient(135deg, #e6edf4 0 6px, #dfe8f1 6px 12px); }
+#card .staff .band { background: #1e6a72; }
+#card .staff { background: #f2f2ee; }
+#card .transit .band { background: #1c2a52; color: #f0c83c; }
+#card .transit { background: #f4ecd2; }
+#card .student .band { background: #6e1a26; color: #f0c040; }
+#card .student { background: #f2ece2; }
+#card .notes { margin-top: 10px; background: rgba(4, 5, 10, 0.92); color: var(--ink); padding: 10px 14px; font-size: 14px; line-height: 18px; }
+#card .notes ul { list-style: none; padding: 0; margin: 6px 0; }
+#card .notes li { margin: 3px 0; }
+#card .notes li i { font-style: normal; color: var(--mark); margin-right: 6px; }
+#card .notes li.unk { color: #5a6070; }
+#card .notes .redact { background: #2a3040; }
+#card .seen { color: var(--bright); }
+#card .logt { color: var(--mark); margin-top: 8px; }
+#card .ph { font-size: 11px; opacity: 0.6; margin-top: 6px; }
+#card .close { text-align: right; color: var(--ink); font-size: 13px; cursor: pointer; padding: 4px 2px; }
