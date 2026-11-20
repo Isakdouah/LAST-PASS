@@ -45,6 +45,8 @@ export interface Hero {
   costs: string[];
   /** What they say on the radio after a close call (one per cost). */
   after: string[];
+  /** Why they will not do what you say (when they do not trust you yet). PLACEHOLDER lines. */
+  refuse: string[];
 }
 
 export const HEROES: Hero[] = [
@@ -81,6 +83,7 @@ export const HEROES: Hero[] = [
     },
     costs: ['Five patients who could not be moved stay behind in the stairwell.'],
     after: ["Rosa: We're out. Copy? We're out. I left five of them. I told them I'd come back. I won't be able to come back."],
+    refuse: ["Rosa: I have eleven patients on this floor who can't walk. I'm not leaving them because a voice on the radio says so.", 'Rosa: Charge nurse says nobody leaves the unit. If I go, I lose my license. Give me something real.'],
   },
   {
     id: 'walt',
@@ -119,6 +122,7 @@ export const HEROES: Hero[] = [
       'Walt: ...reading you weak, I know. Had to leave the big set. Handheld only now. We made it out of the basement. QSL?',
       "Walt: Lost my glasses. Can't see a damn thing past the hood. You'll have to be my eyes now. Seventy-three.",
     ],
+    refuse: ["Walt: Forty years in this house. Margaret's ashes are on the mantel. I'm not running from a rumour.", "Walt: I'll believe it when I see it with my own eyes. Basement door's bolted. I'm staying."],
   },
   {
     id: 'abdi',
@@ -157,6 +161,7 @@ export const HEROES: Hero[] = [
       'Abdi: Thirty-two. Thirty-two on board. There were forty. The doors... Thirty-two.',
       'Abdi: Engine is making a sound I do not like. We go as far as she goes, then we walk.',
     ],
+    refuse: ['Abdi: Dispatch says hold at the stop. If I leave the route, I lose the job. My daughter needs this job.', 'Abdi: There are still people running for the bus. I wait one more minute. One more.'],
   },
   {
     id: 'dorms',
@@ -191,6 +196,7 @@ export const HEROES: Hero[] = [
     },
     costs: ['She had to let go of the backpack. The story cloth is somewhere on the ramp to I-94.'],
     after: ["Mai: okay okay okay. We're on the highway. Danny's here. I lost my bag. It doesn't matter. It doesn't matter."],
+    refuse: ["Mai: My roommate is still out. I'm not leaving without Danny, I don't care.", 'Mai: The RA says stay in our rooms and lock the doors. Everyone is staying. I am not going out there alone.'],
   },
 ];
 
@@ -248,6 +254,8 @@ export interface HeroState {
   id: string;
   left: number; // close calls left
   helpedAt: number; // city tick of your last useful help (-1 never)
+  /** How many times they turned down your advice (to pick the next reason). */
+  refusals: number;
   escapeStart: number; // city tick the escape began (-1 none)
   arrived: boolean;
   dead: boolean;
@@ -262,6 +270,7 @@ export function createHeroStates(): HeroState[] {
     id: h.id,
     left: h.closeCalls,
     helpedAt: -1,
+    refusals: 0,
     escapeStart: -1,
     arrived: false,
     dead: false,

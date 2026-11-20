@@ -361,6 +361,14 @@ window.addEventListener('keydown', (e) => {
     handAct.talk = 2;
     game.doPatch();
   }
+  if ((k === 'h' || k === 'H') && game.mode === 'play') {
+    handAct.talk = 3;
+    game.doHeadcast();
+  }
+  if ((k === 'd' || k === 'D') && game.mode === 'play') {
+    handAct.talk = 3;
+    game.doDebunk();
+  }
   if (game.mode === 'sandbox') {
     if (k === 'r' || k === 'R') game.reset('sandbox');
     if (k >= '5' && k <= '8') game.sandboxRate = [3, 6, 15, 40][Number(k) - 5];
@@ -660,7 +668,7 @@ function keysText() {
   if (view === 'tele') h += 'Wheel zoom · drag move · right-drag turn · F station · G Minneapolis · click a hero for their card<br>';
   else if (view === 'cupola') h += 'Drag to look around · wheel in: telescope<br>';
   else h += 'Drag to circle the station · wheel zoom<br>';
-  h += 'Arrows tune · W warn · P patch · T thermal · Space pause';
+  h += 'Arrows tune · W warn · P patch · H "aim for the head" · D answer a rumour · T thermal · Space pause';
   return h;
 }
 function hintText(): string {
@@ -668,6 +676,9 @@ function hintText(): string {
   const known = game.radio.groups.filter((g) => g.known);
   if (!inWindow(game.t)) return 'Far side of the Earth. What you did shows up next pass.';
   if (view !== 'tele') return 'Minneapolis is in sight. Scroll in for the telescope, G finds the city.';
+  if (game.proof && (!game.headcast || !game.headcast.proof)) return 'You have proof now. H tells the whole city to aim for the head.';
+  const rum = game.rumours.find((x) => x.active && x.seen && !x.debunked);
+  if (rum) return 'You have seen it with your own eyes. D answers the rumour.';
   if (known.length === 0) return 'Radio: Up/Down tune fast, Left/Right fine. Hams use 146.52.';
   const r = game.radio;
   if (r.stats.patches === 0 && known.every((g) => g.warnedAt < 0) && r.stats.warnRight + r.stats.warnWrong === 0)

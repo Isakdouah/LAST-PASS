@@ -228,6 +228,9 @@ export function warn(r: Radio, w: World, gr: Group, tick: number, seed: number):
       if (x < 0 || y < 0 || x >= w.width || y >= w.height) continue;
       const i = y * w.width + x;
       const ring = Math.max(Math.abs(x - cx), Math.abs(y - cy));
+      // A voice they trust wakes the street and steadies it: fewer of them turn on each other.
+      w.aware[i] = Math.max(w.aware[i], ring <= 2 ? 1 : 0.6);
+      w.calm[i] = Math.max(w.calm[i], 1 - ring * 0.15);
       if (ring <= 1) w.guard[i] = 1;
       else if (w.infected[i] < 1) {
         const k = 0.5;

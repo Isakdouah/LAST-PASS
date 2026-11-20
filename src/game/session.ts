@@ -15,6 +15,7 @@ import { enterStreet, equip, Kind, leaveStreet, newAgent, stepStreet, Street } f
 import type { Sound } from '../audio';
 import { eventsBetween, WorldEvent } from './world';
 import { createHeroStates, escapeAt, escapeChance, heroById, HeroState, HEROES, setRouter } from './heroes';
+import { createRumours, rumourById, rumourEffect, RumourState, RUMOURS } from './rumours';
 import { rng } from '../sim/outbreak';
 
 export const TICK = 60; // game seconds per city-wide step (docs/tuning.md)
@@ -297,6 +298,13 @@ export class Session {
   heroes: HeroState[] = createHeroStates();
   /** Tests can fix the dice for close calls (0 = always escape, 1 = never). */
   luck: (() => number) | null = null;
+  /** You saw one of the dead get back up after a body shot: proof that only the head counts. */
+  proof = false;
+  private seenGetUps = 0;
+  private proofStreet: Street | null = null;
+  /** Your "aim for the head" broadcast: when, and whether you had proof. */
+  headcast: { tick: number; proof: boolean } | null = null;
+  rumours: RumourState[] = createRumours();
   newsQueue: WorldEvent[] = [];
   news: WorldEvent[] = [];
   nextNews = 0;
@@ -323,6 +331,10 @@ export class Session {
     this.newsQueue = [];
     this.news = [];
     this.heroes = createHeroStates();
+    this.rumours = createRumours();
+    this.proof = false;
+    this.seenGetUps = 0;
+    this.headcast = null;
     this.startPop = count(this.world.healthy);
     const world = this.world;
     if (m === 'play') {
@@ -394,8 +406,18 @@ export class Session {
     if (!this.radioUp()) return this.say('', 'No line of sight. The radio only reaches Minneapolis during a pass.', 3);
     if (!group || signal < 0.75) return this.say('', 'Tune to someone first (arrow keys, or the wheel over the radio).', 3);
     this.syncStreetFirst();
-    this.talk(group, warn(this.radio, this.world, group, this.tick, this.tick * 31 + 7));
+    const refusedBefore = this.radio.stats.refused;
+    let reply = warn(this.radio, this.world, group, this.tick, this.tick * 31 + 7);
     const hs = this.heroState(group.id);
+    const hero = heroById(group.id);
+    if (hs && hero && this.radio.stats.refused > refusedBefore) {
+      // They decide. Not trusting a voice from space yet, they have their reasons.
+      const why = hero.refuse[hs.refusals++ % hero.refuse.length];
+      reply = why;
+      hs.log.push({ t: this.t, text: `${localTime(this.t)} You warned them. They would not go. "${why.replace(/^[^:]+: /, '')}"` });
+      group.trust = Math.min(1, group.trust + 0.05); // being right later starts here
+    }
+    this.talk(group, reply);
     if (hs && group.warnedAt === this.tick) {
       hs.helpedAt = this.tick;
       hs.log.push({ t: this.t, text: `${localTime(this.t)} You warned them. They listened.` });
@@ -424,6 +446,44 @@ export class Session {
     this.radio.patchFrom = null;
     this.talk(group, reply);
   }
+  /** SPEAK to everyone: "aim for the head". Spreads over the next hour or so. Without proof
+   *  (seeing one get back up yourself) most people do not believe it, and it costs trust. */
+  doHeadcast() {
+    if (!this.radioUp()) return this.say('', 'No line of sight. The radio only reaches Minneapolis during a pass.', 3);
+    if (this.headcast && (this.headcast.proof || !this.proof)) return this.say('', 'You already told them. It is spreading, block by block.', 4);
+    this.headcast = { tick: this.tick, proof: this.proof };
+    for (const g of this.radio.groups) {
+      if (g.kind === 'broadcast') continue;
+      g.trust = Math.max(0, Math.min(1, g.trust + (this.proof ? 0.05 : -0.1)));
+      const hs = this.heroState(g.id);
+      if (hs) hs.log.push({ t: this.t, text: `${localTime(this.t)} You told the whole city to aim for the head${this.proof ? ', and you had seen why' : ', without proof'}.` });
+    }
+    const s = this.street;
+    if (s) for (const a of s.agents) if (a.kind === Kind.Living && Math.random() < (this.proof ? 0.6 : 0.25)) a.know = 1;
+    this.say(
+      'You, on every channel',
+      this.proof
+        ? 'Listen. I watched one take a bullet in the chest and get back up. Only the head stops them. Aim for the head.'
+        : 'Aim for the head. Only the head stops them. ...Most of them have no reason to believe you yet. Find proof.',
+      7,
+    );
+  }
+
+  /** SPEAK: knock down the latest rumour. Works only if you have looked at the place yourself. */
+  doDebunk() {
+    if (!this.radioUp()) return this.say('', 'No line of sight. The radio only reaches Minneapolis during a pass.', 3);
+    const st = [...this.rumours].reverse().find((r) => r.active && !r.debunked);
+    if (!st) return this.say('', 'No rumour going round right now.', 3);
+    const r = rumourById(st.id);
+    if (!st.seen) {
+      for (const g of this.radio.groups) if (g.kind !== 'broadcast') g.trust = Math.max(0, g.trust - 0.08);
+      return this.say('', `They ask how you know. You have not looked at ${r.place} yet. Look first, then speak. (Trust lost.)`, 6);
+    }
+    st.debunked = true;
+    for (const g of this.radio.groups) if (g.kind !== 'broadcast') g.trust = Math.min(1, g.trust + 0.05);
+    this.say('You, on every channel', r.truth, 7);
+  }
+
   talk(g: Group, text: string) {
     this.say(g.who, text, 4 + text.length / 16);
     this.sound.say(text, g.pitch, g.rate);
@@ -459,6 +519,7 @@ export class Session {
       }
     });
     this.moveHeroes();
+    this.spreadHeadcast();
     this.tick++;
     const s = this.street;
     if (s) {
@@ -513,7 +574,18 @@ export class Session {
     const hour = 19 + 40 / 60 + this.t / 3600;
     // Local TV breaks in around 9 PM; phones and radio carry it from there (guess).
     const news = Math.max(0, Math.min(1, (this.t - 4800) / 7200));
-    return { hour, dark: 0.8, news };
+    const r = rumourEffect(this.rumours);
+    return { hour, dark: 0.8, news, leave: r.leave, strife: r.strife };
+  }
+
+  /** The broadcast spreads through radios, phones and word of mouth, one block at a time. */
+  private spreadHeadcast() {
+    const h = this.headcast;
+    if (!h || this.tick - h.tick > 180) return;
+    const target = h.proof ? 0.8 : 0.3;
+    const k = h.proof ? 0.025 : 0.012;
+    const w = this.world;
+    for (let i = 0; i < w.know.length; i++) if (w.land[i] && w.know[i] < target) w.know[i] += (target - w.know[i]) * k;
   }
 
   /** Cars that drove out of the street area join the city numbers just outside it, still on the road. */
@@ -657,8 +729,29 @@ export class Session {
         return;
       }
     }
+    if (this.mode === 'play')
+      for (const st of this.rumours) {
+        const r = rumourById(st.id);
+        if (!st.active && this.t >= r.at) {
+          st.active = true;
+          this.newsQueue.push({ t: this.t, lat: 44.98, lon: -93.27, source: r.source, text: `${r.text} (Rumour. Look at ${r.place}, then press D to answer it.)` });
+        }
+        // Looking at the place, close enough to tell, during a pass.
+        if (st.active && !st.seen && zone && this.canLook() && zone.x1 - zone.x0 < 40 && r.where.x > zone.x0 && r.where.x < zone.x1 && r.where.y > zone.y0 && r.where.y < zone.y1) {
+          st.seen = true;
+          this.say('', `You can see ${r.place} now. Press D to tell them what you see.`, 5);
+        }
+      }
     this.setZone(this.canLook() ? zone : null);
     const s = this.street;
+    if (s && s !== this.proofStreet) (this.proofStreet = s), (this.seenGetUps = s.stats.getUps);
+    if (s && streetVisible && s.stats.getUps > this.seenGetUps) {
+      this.seenGetUps = s.stats.getUps;
+      if (!this.proof && this.canLook()) {
+        this.proof = true;
+        this.say('', 'You saw it: shot in the chest, it got back up. Only the head stops them. Press H to tell everyone.', 7);
+      }
+    }
     if (s && streetVisible) {
       stepStreet(s, this.world, this.tick * 7919 + Math.floor(now), Math.min(0.3, gameDt), blocked, this.env(), onRoad);
       this.drainExits(s);

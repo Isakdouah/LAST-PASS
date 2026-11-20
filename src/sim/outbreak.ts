@@ -78,6 +78,9 @@ export interface Env {
   dark: number;
   /** 0..1: how much the TV and phones have spread the news by now. */
   news: number;
+  /** Rumours: share of people who still leave (1 = normal), and how much more they fight each other. */
+  leave?: number;
+  strife?: number;
 }
 
 export const DEFAULT_RULES: Rules = { bite: 0.6, surge: 0.35, melee: 0.05, roadPull: 2.5, fireRate: 3 };
@@ -330,7 +333,7 @@ export function step(w0: World, rules: Rules = DEFAULT_RULES, env: Env = EVENING
       for (const j of nbrs(i, width, height, N)) if (land[j] && w0.healthy[j] > 0) (herd += w0.moving[j] / w0.healthy[j]), k++;
       herd = k ? herd / k : 0;
       const armedShare = armed[i] / h;
-      const go = Math.min(0.5, aware[i] * danger * 0.35 * (1 + 2 * herd) * (1 - 0.5 * armedShare) * (1 - 0.6 * guard[i]));
+      const go = Math.min(0.5, (env.leave ?? 1) * aware[i] * danger * 0.35 * (1 + 2 * herd) * (1 - 0.5 * armedShare) * (1 - 0.6 * guard[i]));
       moving[i] = Math.min(h, moving[i] + (h - moving[i]) * go);
     }
   }
@@ -342,7 +345,7 @@ export function step(w0: World, rules: Rules = DEFAULT_RULES, env: Env = EVENING
     if (!land[i] || h < 1) continue;
     const z = infected[i];
     const suspicion = aware[i] * (z / (h + z + 1)) * Math.min(1, (armed[i] / h) * 4);
-    const rate = (0.006 * jam[i] + 0.004 * suspicion) * (1 - 0.8 * calm[i]);
+    const rate = (0.006 * jam[i] + 0.004 * suspicion) * (1 - 0.8 * calm[i]) * (env.strife ?? 1);
     const killed = Math.min(h * 0.2, h * rate * (0.5 + r()));
     if (killed <= 0) continue;
     const keep = 1 - killed / h;
