@@ -9,6 +9,7 @@ import { CAR_COLOURS, SIZE, VEHICLE_SCALE, vehicleGeometry, VKind } from './vehi
 import { HEROES, routeCells, escapeAt } from '../game/heroes';
 import { query, Shapes, TILE } from '../map/detail';
 import { Kind, Role, Street } from '../sim/street';
+import { asleepShare } from '../sim/outbreak';
 
 const HALF_W = (GW * CELL_X) / 2;
 const HALF_H = (GH * CELL_Y) / 2;
@@ -121,7 +122,9 @@ void main() {
     vec2 f = vec2(fract(vU / cw), fract(vW.y / fh));
     float win = step(0.28, f.x) * step(f.x, 0.72) * step(0.35, f.y) * step(f.y, 0.82) * step(1.0, vW.y) * step(vW.y, vH - 0.7);
     float r = h21(vec2(fl * 7.0 + vSeed * 91.0, cl));
-    float lit = step(r, 0.42 * (1.0 - dark));
+    // Lit windows follow who is awake: houses wake up one by one as the news spreads.
+    float awake = o.a < 0.19 ? o.a / 0.177 : 0.0;
+    float lit = step(r, (0.06 + 0.5 * awake) * (1.0 - dark));
     vec3 glass = vec3(0.05, 0.06, 0.10);
     vec3 lamp = mix(vec3(1.0, 0.78, 0.42), vec3(0.75, 0.85, 1.0), step(0.85, h21(vec2(cl, fl + vSeed))));
     vec3 wc = mix(glass, lamp * (0.7 + 0.3 * r), lit);
@@ -288,6 +291,8 @@ const COL = {
   armed: new THREE.Color(0.38, 0.62, 1.0),
   police: new THREE.Color(0.2, 0.38, 0.95),
   dead: new THREE.Color(0.44, 0.86, 0.31),
+  downed: new THREE.Color(0.3, 0.6, 0.22),
+  sick: new THREE.Color(0.78, 0.86, 0.7), // bitten, hiding it: grey-green, shaking
   fallen: new THREE.Color(0.45, 0.08, 0.08),
 };
 
@@ -305,6 +310,8 @@ export class CityLayer {
   private agents: THREE.InstancedMesh;
   private agentsB: THREE.InstancedMesh;
   private shadows: THREE.InstancedMesh;
+  /** Cars people are driving away in (street level). */
+  private cars: THREE.InstancedMesh;
   private heroVeh = new Map<string, THREE.Mesh>();
   private heroFig = new Map<string, THREE.Mesh>();
   private selBox: THREE.LineSegments;
@@ -380,6 +387,14 @@ export class CityLayer {
     this.shadows.frustumCulled = false;
     this.shadows.count = 0;
     this.scene.add(this.shadows);
+    // Cars on the move: one shape, many paint colours (multiplied in).
+    this.cars = new THREE.InstancedMesh(vehicleGeometry('car', 0xffffff), vehicleMat, 400);
+    this.cars.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.cars.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(400 * 3), 3);
+    this.cars.frustumCulled = false;
+    this.cars.renderOrder = 0.6;
+    this.cars.count = 0;
+    this.scene.add(this.cars);
     // Heroes: their vehicle and themselves, and a thin selection box.
     for (const h of HEROES) {
       const v = new THREE.Mesh(vehicleGeometry(h.vehicle.kind, h.vehicle.colour), vehicleMat);
@@ -453,13 +468,22 @@ export class CityLayer {
   /** Copy the city numbers into the overlay picture (fire, dead, living, power). */
   updateOverlay(s: Session) {
     const w = s.world, f = s.fires.fire, o = this.over;
+    const asleep = asleepShare(s.env().hour);
     for (let i = 0; i < GW * GH; i++) {
       const j = i * 4;
       o[j] = Math.min(255, f[i] * 255);
       o[j + 1] = Math.min(255, w.infected[i] * 2);
       o[j + 2] = Math.min(255, w.healthy[i] * 1.2);
-      o[j + 3] = s.isDark(i) ? 255 : 0;
+      // Alpha: 255 = power out; small values = how many windows are lit (people awake).
+      const aware = w.aware[i];
+      o[j + 3] = s.isDark(i) ? 255 : Math.round(45 * (1 - asleep * (1 - aware)));
     }
+    const st = s.street;
+    if (st)
+      for (let li = 0; li < st.aware.length; li++) {
+        const i = (st.y0 + Math.floor(li / st.w)) * GW + st.x0 + (li % st.w);
+        if (o[i * 4 + 3] < 255) o[i * 4 + 3] = Math.round(45 * (1 - asleep * (1 - st.aware[li])));
+      }
     this.overTex.needsUpdate = true;
     this.overSmooth.needsUpdate = true;
   }
@@ -638,6 +662,7 @@ export class CityLayer {
       A.count = 0;
       A2.count = 0;
       SH.count = 0;
+      this.cars.count = 0;
       this.blood.count = 0;
       (this.tracers.geometry as THREE.BufferGeometry).setDrawRange(0, 0);
       return;
@@ -647,16 +672,32 @@ export class CityLayer {
     const m = this.tmpM, q = this.tmpQ, p = this.tmpV, sc = this.tmpS;
     const one = new THREE.Vector3(1, 1, 1), sp = new THREE.Vector3(), q0 = new THREE.Quaternion();
     const yAxis = new THREE.Vector3(0, 1, 0), xAxis = new THREE.Vector3(1, 0, 0);
+    let nc = 0;
+    const CS = this.cars, cc = new THREE.Color();
     for (let k = 0; k < st.agents.length && n + n2 < 2600; k++) {
       const a = st.agents[k];
       cellToLocal(a.x, a.y, p);
+      if (a.kind === Kind.Living && a.car === 1) {
+        // Driving away: a car, facing the way it goes.
+        if (nc < 400) {
+          q.setFromAxisAngle(yAxis, -a.face + Math.PI / 2);
+          p.y = 0;
+          m.compose(p, q, sc.set(VEHICLE_SCALE, VEHICLE_SCALE, VEHICLE_SCALE));
+          CS.setMatrixAt(nc, m);
+          cc.setHex(CAR_COLOURS[Math.floor(hash(k * 977) * CAR_COLOURS.length)]);
+          CS.setColorAt(nc, this.thermal ? THERM.warm : cc);
+          nc++;
+        }
+        continue;
+      }
       let c = COL.living;
       let flip = false;
-      if (a.kind === Kind.Fallen) {
+      const lying = a.kind === Kind.Fallen || (a.kind === Kind.Dead && a.down > 0);
+      if (lying) {
         q.setFromAxisAngle(yAxis, a.face);
         q.multiply(new THREE.Quaternion().setFromAxisAngle(xAxis, Math.PI / 2));
         p.y = 0.25;
-        c = COL.fallen;
+        c = a.kind === Kind.Fallen ? COL.fallen : COL.downed;
       } else {
         // Face where they are going (sim angles: x east, y south, same as our x and z).
         q.setFromAxisAngle(yAxis, -a.face + Math.PI / 2);
@@ -669,7 +710,14 @@ export class CityLayer {
           m.compose(sp, q0, one.set(FIG * 0.9, 1, FIG * 0.9));
           SH.setMatrixAt(ns++, m);
         }
+        if (a.kind === Kind.Dead && a.crawl) {
+          // Crawling: low to the ground, dragging itself.
+          q.multiply(new THREE.Quaternion().setFromAxisAngle(xAxis, 1.25));
+          p.y = 0.2;
+          flip = false;
+        }
         if (a.kind === Kind.Dead) c = COL.dead;
+        else if (a.turn >= 0 && a.turn < 25) c = COL.sick;
         else if (a.role === Role.Police) c = COL.police;
         else if (a.armed && a.ammo > 0) c = COL.armed;
         else if (a.fear > 0.5) c = COL.scared;
@@ -694,6 +742,9 @@ export class CityLayer {
     }
     SH.count = ns;
     SH.instanceMatrix.needsUpdate = true;
+    CS.count = nc;
+    CS.instanceMatrix.needsUpdate = true;
+    if (CS.instanceColor) CS.instanceColor.needsUpdate = true;
     // Blood on the ground.
     const B = this.blood;
     const nb = Math.min(4000, st.blood.length);
@@ -784,6 +835,24 @@ export class CityLayer {
           cellToLocal(a.x, a.y, p);
           add(p.x, 1.8, p.z, 4, 1.0, 0.95, 0.7, 1);
         }
+      // Headlights ahead of every car on the move; brake lights when it is stuck in a jam.
+      for (const a of st.agents) {
+        if (a.kind !== Kind.Living || a.car !== 1) continue;
+        const fx = Math.cos(a.face), fy = Math.sin(a.face);
+        const L = (SIZE.car.l * VEHICLE_SCALE) / 2 / CELL_X;
+        const side = (0.6 * VEHICLE_SCALE) / CELL_X;
+        for (const sgn of [-1, 1]) {
+          cellToLocal(a.x + fx * L - fy * side * sgn, a.y + fy * L + fx * side * sgn, p);
+          add(p.x, 0.9, p.z, 3, 1.0, 0.95, 0.8, 0.95);
+          if (a.stuck > 0.5) {
+            cellToLocal(a.x - fx * L - fy * side * sgn, a.y - fy * L + fx * side * sgn, p);
+            add(p.x, 0.9, p.z, 2.5, 1.0, 0.15, 0.1, 0.9);
+          }
+        }
+        // The beam on the road.
+        cellToLocal(a.x + fx * L * 3, a.y + fy * L * 3, p);
+        add(p.x, 0.3, p.z, 8, 0.9, 0.85, 0.6, 0.12);
+      }
       for (const pf of st.puffs) {
         cellToLocal(pf.x, pf.y, p);
         add(p.x, 0.8, p.z, 2.5, 0.75, 0.7, 0.6, Math.min(1, pf.t * 3));

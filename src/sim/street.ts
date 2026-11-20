@@ -192,7 +192,8 @@ const RANGE = { civ: m(55), police: m(90) }; // how far the armed shoot
 const COOL = { civ: 1.3, police: 0.6 }; // seconds between shots
 const BULLET_SPEED = m(170); // slowed down so you can see it (real bullets are invisible)
 const BODY_R = m(0.6); // a stray bullet passing this close to someone may hit them
-const STRAY_HIT = 0.35; // chance it does
+const STRAY_HIT = 0.35; // chance it does (one of the dead, coming at you)
+const STRAY_LIVING = 0.08; // people duck, run, stand behind the shooter (guess)
 const RALLY = m(300); // how far a scared person will run to reach someone armed
 const SWING = 0.9; // seconds between swings
 
@@ -504,14 +505,19 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
           const can = (x: number, y: number) => isLand(world, x, y) && !blocked(x, y) && onRoad(x, y);
           if (!can(a.x + vx, a.y + vy)) {
             // Turn along the road: try the axes, then a random new heading.
-            if (can(a.x + vx, a.y)) vy = 0;
-            else if (can(a.x, a.y + vy)) vx = 0;
-            else {
-              const ang = r() * Math.PI * 2;
-              vx = Math.cos(ang) * step;
-              vy = Math.sin(ang) * step;
-              if (!can(a.x + vx, a.y + vy)) (vx = 0), (vy = 0);
+            const base = Math.atan2(vy, vx);
+            let found = false;
+            for (const turn of [0.5, -0.5, 1.0, -1.0, 1.57, -1.57, 2.3, -2.3]) {
+              const ang = base + turn * (r() < 0.5 ? 1 : -1);
+              const ux = Math.cos(ang) * step, uy = Math.sin(ang) * step;
+              if (can(a.x + ux, a.y + uy)) {
+                vx = ux;
+                vy = uy;
+                found = true;
+                break;
+              }
             }
+            if (!found) (vx = 0), (vy = 0);
           }
           if (vx || vy) {
             // Running into the dead: knocks them over (and sometimes worse).
@@ -744,7 +750,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
           const dd = (o.x - qx) ** 2 + (o.y - qy) ** 2;
           if (t >= ht) continue;
           if (o === b.target && b.hit && dd < m(1.5) ** 2) (ht = t), (hit = o), (onTarget = true);
-          else if (o !== b.target && dd < BODY_R * BODY_R && r() < STRAY_HIT * (o.kind === Kind.Dead && o.down > 0 ? 0.3 : 1)) (ht = t), (hit = o), (onTarget = false);
+          else if (o !== b.target && dd < BODY_R * BODY_R && r() < (o.kind === Kind.Living ? STRAY_LIVING : STRAY_HIT * (o.down > 0 ? 0.3 : 1))) (ht = t), (hit = o), (onTarget = false);
         }
       }
     if (hit) {

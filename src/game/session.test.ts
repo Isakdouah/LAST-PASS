@@ -32,3 +32,28 @@ describe('session (one night, no drawing)', () => {
     expect(n).toBeGreaterThan(200);
   });
 });
+
+describe('nobody appears from nowhere', () => {
+  it('looking closely (street level) and looking away keeps everyone counted', () => {
+    const g = new Session(quiet);
+    g.reset('play');
+    while (g.t < 1200 + 2 * 5520 - 60) {
+      g.t += 60;
+      g.cityStep();
+    }
+    const all = () => {
+      const t = g.totals();
+      return t.alive + t.dead + t.fallen + t.escaped;
+    };
+    const before = all();
+    for (let k = 0; k < 3; k++) {
+      const f = { x: 95 + k * 10, y: 150 };
+      g.setZone({ x0: f.x - 6, y0: f.y - 6, x1: f.x + 6, y1: f.y + 6 });
+      for (let j = 0; j < 200; j++) g.simulate(0.05, j * 50, { x0: f.x - 6, y0: f.y - 6, x1: f.x + 6, y1: f.y + 6 }, true);
+      g.setZone(null);
+    }
+    // The street's own fallen count once they are written back.
+    expect(all()).toBeGreaterThan(before * 0.98);
+    expect(all()).toBeLessThan(before * 1.02);
+  });
+});

@@ -803,12 +803,14 @@ export class Session {
     let alive = count(this.world.healthy);
     let dead = count(this.world.infected);
     const s = this.street;
-    if (s)
+    if (s) {
       for (const a of s.agents) {
         if (a.kind === Kind.Living) alive += s.scale;
         if (a.kind === Kind.Dead) dead += s.scale;
       }
-    return { alive, dead, fallen: count(this.world.fallen) };
+      alive += count(s.indoor);
+    }
+    return { alive, dead, fallen: count(this.world.fallen), escaped: this.world.stats.escaped };
   }
 
   isDark(i: number) {
