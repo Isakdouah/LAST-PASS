@@ -341,6 +341,8 @@ export class Session {
       // third floor. Floor counts are guesses (OSM has no heights here); check real plans.
       this.buildings.set('rosa', createBuilding('rosa', 'HCMC, the Red Building', 8, 140, 4, 3));
       this.buildings.set('dorms', createBuilding('dorms', 'Pioneer Hall', 5, 160, 2, 5));
+      // Gloria: the community centre kitchen, ground floor; two floors (a guess, placeholder building).
+      this.buildings.set('gloria', createBuilding('gloria', 'Rondo community centre', 2, 70, 0, 7));
     }
     this.proof = false;
     this.seenGetUps = 0;

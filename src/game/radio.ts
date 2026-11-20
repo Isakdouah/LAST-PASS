@@ -75,6 +75,8 @@ export function createRadio(): Radio {
       g('abdi', 'Abdi, bus 21', 'Abdi Warsame', 'bus', cell(-93.2875, 44.986), 147.0, 0.3, 0.95, 1.1),
       // Others you can find.
       g('dorms', 'Mai, U of M dorms', 'Mai Vang', 'civil', { x: 128.5, y: 119.5 }, 151.82, 0.35, 1.2, 1.15),
+      // St Paul: a walkie on the MURS band (154.57 MHz, a real licence-free channel).
+      g('gloria', 'Gloria, Rondo kitchen', 'Gloria Hollins', 'star', cell(-93.1265, 44.9557), 154.57, 0.4, 0.95, 0.95),
       g('p1', 'MPD 1st Precinct', 'Sgt. Hale', 'police', { x: 88.6, y: 122.8 }, 155.37, 0.15, 0.85, 1.0),
       g('p3', 'MPD 3rd Precinct', 'Lt. Okafor', 'police', cell(-93.2326, 44.9486), 155.61, 0.15, 0.9, 1.0),
       g('p5', 'MPD 5th Precinct', 'Officer Berg', 'police', { x: 82.4, y: 155.6 }, 155.85, 0.15, 1.0, 1.05),
@@ -175,6 +177,16 @@ STAR.dorms = [
   "okay okay okay. There's a guy here, Danny, his mom's a nurse downtown. Have you heard anything from the hospital?",
   "Phones are dead. My battery's at one bar. I'm saving it for you.",
   "If you see a way out, tell me. I'm not staying in this building another night.",
+];
+// PLACEHOLDER lines for ISAK to rewrite. St Paul gets the trouble late: she hears it first
+// from the people arriving.
+STAR.gloria = [
+  "Hello? Marcus, is that you? ...No. Who is this? The space station. Baby, I'm too old for jokes. ...You're serious.",
+  "People keep coming up Dale Street from the river. They say Minneapolis is on fire. I've got coffee on and the big room open.",
+  "Forty-one heads in my kitchen. Kids asleep on the gym mats. Somebody's bleeding and swears it's nothing. I don't like how he looks.",
+  "If you can see the bridges, tell the ones coming over to come to the centre. Lights are on. Doors are open.",
+  "There's a girl on the radio looking for her grandma in Frogtown? That's Mrs Vang. I know her. I'll go.",
+  "Sun's coming. We are still here. You tell them St Paul kept the lights on.",
 ];
 const NOAA = [
   'This is the National Weather Service. A health advisory is in effect for Hennepin County. Residents should stay indoors and avoid emergency rooms unless necessary.',

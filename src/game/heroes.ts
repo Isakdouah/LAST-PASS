@@ -198,6 +198,51 @@ export const HEROES: Hero[] = [
     after: ["Mai: okay okay okay. We're on the highway. Danny's here. I lost my bag. It doesn't matter. It doesn't matter."],
     refuse: ["Mai: My roommate is still out. I'm not leaving without Danny, I don't care.", 'Mai: The RA says stay in our rooms and lock the doors. Everyone is staying. I am not going out there alone.'],
   },
+  {
+    // St Paul. The other heroes are all running toward St Paul; Gloria is where they arrive.
+    // Rondo history (I-94 cut through the neighbourhood in the 1960s and displaced hundreds of
+    // Black families) is real; Gloria, her family and the details are PLACEHOLDERS for ISAK.
+    id: 'gloria',
+    name: 'Gloria Hollins',
+    card: 'license',
+    printed: { dl: 'H-452-118-640-31', dob: '07/14/1953', exp: '07/14/2013', addr: '668 Carroll Ave\nSt Paul MN 55104', cls: 'D', sex: 'F', hgt: "5'-5\"", eyes: 'BRO', rest: 'CORRECTIVE LENSES' },
+    portrait: { skin: '#6a4430', hair: '#2a2420', style: 'short', shirt: '#c8a040', glasses: true, grey: true },
+    vehicle: { kind: 'car', colour: 0xb8bcc4, label: "her nephew's silver Buick", before: 'the lit kitchen windows of the community centre' },
+    lore: [
+      { label: 'Job', text: 'Runs the kitchen at a community centre in Rondo. Feeds the after-school kids and the Friday seniors.', learn: { heard: 1 } },
+      { label: 'Home', text: 'Rondo, St Paul, her whole life. Her mother lost the family house when I-94 was cut through in the sixties.', learn: { heard: 2 } },
+      { label: 'Wants tonight', text: 'Keep the doors open for everyone coming over the river, as long as it is safe. Then one minute longer.', learn: { heard: 3 } },
+      { label: 'Carries', text: 'A ring of keys to half the buildings on the block and a walkie her nephew left in the kitchen.', learn: { seen: true } },
+      { label: 'Link', text: "Mai Vang's grandmother lives two streets over in Frogtown. Gloria checks on her every Sunday.", learn: { heard: 4 } },
+      { label: 'Radio habit', text: 'Calls everybody "baby", even you. Counts heads like a lunch line.', learn: { heard: 2 } },
+      { label: 'Fear', text: 'Locking the door on somebody. She has seen what it does to a neighbourhood when the doors close.', learn: { event: 'closecall' } },
+      { label: 'Secret', text: "Her nephew Marcus works nights at a Minneapolis hospital. He stopped answering at nine o'clock.", learn: { event: 'arrived' } },
+    ],
+    closeCalls: 2,
+    escape: {
+      label: "her nephew's Buick, the last ones from the kitchen",
+      to: "Frogtown for Mai's grandmother, then her sister's on the East Side",
+      seats: 5,
+      kmh: 30,
+      route: [
+        { lat: 44.9557, lon: -93.1265 },
+        { lat: 44.9557, lon: -93.1165 },
+        { lat: 44.96, lon: -93.1165 },
+        { lat: 44.9557, lon: -93.105 },
+        { lat: 44.96, lon: -93.09 },
+        { lat: 44.9705, lon: -93.073 },
+      ],
+    },
+    costs: ['She had to lock the side door with people still outside it.', "The Buick's back window is gone and Mai's grandmother is hurt. They drive slowly now."],
+    after: [
+      "Gloria: I locked it. Lord help me, I locked it. There were still people on the steps. Don't you ever tell me that was right.",
+      "Gloria: We got her. We got Mrs Vang. She's cut but she's talking. You tell that girl her grandma is with me.",
+    ],
+    refuse: [
+      "Gloria: Baby, there are forty people in my kitchen and more coming up Dale Street. I'm not closing the doors because you say so.",
+      "Gloria: You've never seen this block. I have, for fifty-six years. Give me a reason, not an order.",
+    ],
+  },
 ];
 
 export const heroById = (id: string) => HEROES.find((h) => h.id === id);
