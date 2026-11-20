@@ -1,5 +1,5 @@
 // Turns the processed OpenStreetMap file (tools/build_map.py) into a simulation World.
-import { createWorld, World } from '../sim/outbreak';
+import { createWorld, SKILL, World } from '../sim/outbreak';
 
 export interface MapFile {
   name: string;
@@ -70,6 +70,7 @@ export function loadMap(file: MapFile, override?: Place[]): CityMap {
     const i = Math.floor(p.y) * width + Math.floor(p.x);
     if (!world.land[i]) continue;
     world.healthy[i] += POLICE_OFFICERS;
+    world.skill[i] = (world.skill[i] * world.armed[i] + SKILL.police * POLICE_OFFICERS) / (world.armed[i] + POLICE_OFFICERS);
     world.armed[i] += POLICE_OFFICERS;
     world.ammo[i] += POLICE_OFFICERS * POLICE_AMMO;
   }

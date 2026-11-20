@@ -10,7 +10,7 @@ import { DetailFile, Detail, loadDetail } from '../map/detail';
 import { CityMap, loadMap, MapFile } from '../map/loadMap';
 import { cleanPlaces, NamedPlace } from '../map/places';
 import { createFires, Fires, stepFires } from '../sim/fire';
-import { count, step, World } from '../sim/outbreak';
+import { cloneWorld, count, DEFAULT_RULES, Env, step, World } from '../sim/outbreak';
 import { enterStreet, Kind, leaveStreet, newAgent, stepStreet, Street } from '../sim/street';
 import type { Sound } from '../audio';
 import { eventsBetween, WorldEvent } from './world';
@@ -271,18 +271,6 @@ setRouter((pts) => {
   return out;
 });
 
-function cloneWorld(w: World): World {
-  return {
-    ...w,
-    healthy: w.healthy.slice(),
-    infected: w.infected.slice(),
-    fallen: w.fallen.slice(),
-    armed: w.armed.slice(),
-    ammo: w.ammo.slice(),
-    guard: w.guard.slice(),
-  };
-}
-
 export class Session {
   mode: Mode = 'title';
   world!: World;
@@ -440,7 +428,7 @@ export class Session {
   cityStep() {
     const world = this.world;
     const before = world.fallen.slice();
-    this.world = step(world);
+    this.world = step(world, DEFAULT_RULES, this.env(), this.tick * 2654435 + 11);
     const w = this.world;
     const fighting = new Float32Array(w.fallen.length);
     for (let i = 0; i < fighting.length; i++) fighting[i] = w.fallen[i] - before[i];
@@ -510,6 +498,14 @@ export class Session {
         const i = y * GW + x;
         w.healthy[i] = w.infected[i] = w.armed[i] = w.ammo[i] = 0;
       }
+  }
+
+  /** The hour, the dark and how far the news has spread, for the city maths. */
+  env(): Env {
+    const hour = 19 + 40 / 60 + this.t / 3600;
+    // Local TV breaks in around 9 PM; phones and radio carry it from there (guess).
+    const news = Math.max(0, Math.min(1, (this.t - 4800) / 7200));
+    return { hour, dark: 0.8, news };
   }
 
   heroState(id: string): HeroState | undefined {
