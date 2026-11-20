@@ -1,0 +1,61 @@
+@font-face {
+  font-family: 'Pixelify Sans';
+  font-weight: 400;
+  src: url(../data/pixelify-sans-latin-400-normal.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Pixelify Sans';
+  font-weight: 700;
+  src: url(../data/pixelify-sans-latin-700-normal.woff2) format('woff2');
+}
+:root {
+  --ink: #aab0bd;
+  --bright: #e6e8ee;
+  --mark: #ffd640;
+  --dead: #70dc50;
+  --fire: #e23a1e;
+  --scared: #ffbe6e;
+  --panel: rgba(4, 5, 10, 0.72);
+}
+html, body { margin: 0; height: 100%; background: #04050a; overflow: hidden; }
+#screen { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; image-rendering: pixelated; cursor: crosshair; }
+#hud {
+  position: fixed; inset: 0; pointer-events: none;
+  font-family: 'Pixelify Sans', monospace; font-size: 16px; line-height: 20px; color: var(--ink);
+  -webkit-font-smoothing: none; font-smooth: never; text-rendering: optimizeSpeed;
+}
+#hud .box { position: absolute; background: var(--panel); padding: 8px 12px; }
+#hud .bright { color: var(--bright); }
+#hud .mark { color: var(--mark); }
+#hud .dead { color: var(--dead); }
+#hud .fire { color: var(--fire); }
+#hud .scared { color: var(--scared); }
+#clock { left: 16px; top: 16px; min-width: 250px; }
+#radio { right: 16px; top: 16px; width: 300px; }
+#hint { left: 50%; top: 16px; transform: translateX(-50%); color: var(--mark); max-width: calc(100vw - 660px); min-width: 200px; text-align: center; font-size: 14px; line-height: 18px; }
+#sub { left: 50%; bottom: 92px; transform: translateX(-50%); width: min(760px, 70vw); color: var(--bright); font-size: 20px; line-height: 26px; }
+#sub .who { color: var(--mark); }
+#keys { left: 16px; bottom: 16px; font-size: 14px; line-height: 18px; }
+#credit { right: 16px; bottom: 12px; font-size: 12px; line-height: 14px; background: none; padding: 0; opacity: 0.7; }
+#hud .label { position: absolute; font-size: 12px; line-height: 14px; color: var(--bright); white-space: nowrap; transform: translate(-50%, -100%); text-shadow: 1px 1px 0 #000; }
+#hud .label.place { color: var(--ink); }
+#hud .label.contact { color: var(--mark); }
+#dial { position: relative; height: 10px; background: #1c2030; margin: 6px 0; }
+#dial i { position: absolute; top: 5px; width: 2px; height: 5px; background: var(--mark); }
+#dial b { position: absolute; top: 0; width: 2px; height: 10px; background: var(--fire); }
+.bars { display: inline-block; vertical-align: -2px; margin-right: 8px; }
+.bars i { display: inline-block; width: 4px; margin-right: 2px; background: #2a3040; }
+.bars i.on { background: var(--dead); }
+#screenText:empty { display: none; }
+#screenText {
+  position: fixed; inset: 0; background: linear-gradient(90deg, rgba(4,5,10,0.85) 0%, rgba(4,5,10,0.6) 45%, rgba(4,5,10,0) 75%); display: flex; flex-direction: column; justify-content: center; padding: 0 10vw;
+  font-family: 'Pixelify Sans', monospace; color: var(--ink); font-size: 20px; line-height: 30px; pointer-events: none;
+}
+#screenText h1 { font-size: 64px; line-height: 64px; color: var(--bright); margin: 0 0 24px; font-weight: 700; letter-spacing: 2px; }
+#screenText .mark { color: var(--mark); }
+#screenText input {
+  font-family: inherit; font-size: 24px; background: #0c0e18; color: var(--bright); border: 2px solid #3a4058;
+  padding: 6px 10px; width: 360px; outline: none; pointer-events: auto;
+}
+#screenText .small { font-size: 14px; line-height: 20px; }
+#eyepiece { position: fixed; inset: 0; pointer-events: none; }

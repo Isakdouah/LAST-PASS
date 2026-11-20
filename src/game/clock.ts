@@ -88,12 +88,14 @@ export function distanceKm(a: { lat: number; lon: number }, b: { lat: number; lo
 }
 
 export function fmt(sec: number): string {
+  if (!Number.isFinite(sec)) return 'none tonight';
   const s = Math.max(0, Math.round(sec));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 /** Real (wall-clock) seconds it takes for game time to run from a to b. */
 export function realSeconds(a: number, b: number): number {
+  if (!Number.isFinite(b) || !Number.isFinite(a)) return Infinity; // no more passes tonight
   let real = 0;
   for (let x = a; x < b; x += 10) real += Math.min(10, b - x) / rateAt(x);
   return real;

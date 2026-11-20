@@ -41,6 +41,7 @@ uniform float footCos;
 uniform float time;
 uniform vec3 camPos;
 uniform float thermal;
+uniform float lightsFade;
 varying vec3 vN;
 varying vec3 vW;
 ${NOISE}
@@ -75,7 +76,7 @@ void main() {
   // Sunset band along the terminator.
   lit += vec3(0.35, 0.12, 0.02) * exp(-pow(ndl * 9.0, 2.0)) * 0.5;
   vec3 night = col * vec3(0.012, 0.016, 0.03) + vec3(0.004, 0.006, 0.012);
-  float city = texture2D(lights, uv).r;
+  float city = texture2D(lights, uv).r * lightsFade;
   night += vec3(1.0, 0.62, 0.22) * city * 1.3 * (1.0 - cl * 0.75) * l;
   vec3 c = mix(night, lit, day);
   // Atmosphere: blue haze toward the edge of the disc (day side), faint at night.
@@ -160,6 +161,7 @@ export class Globe {
         time: { value: 0 },
         camPos: { value: new THREE.Vector3() },
         thermal: { value: 0 },
+        lightsFade: { value: 1 },
       },
     });
     const earth = new THREE.Mesh(new THREE.SphereGeometry(R_EARTH, 384, 192), this.mat);
@@ -213,10 +215,14 @@ export class Globe {
       const y = ((90 - cty.lat) / 180) * c.height;
       const size = 0.6 + (cty.code / 64) ** 2 * 0.9; // pixels; 10 million people is about 9 px
       const a = Math.min(1, 0.25 + cty.code / 220) * p;
-      g.fillStyle = `rgba(255,255,255,${(a * 0.35).toFixed(3)})`;
-      g.fillRect(x - size * 1.6, y - size * 1.6, size * 3.2, size * 3.2);
+      g.fillStyle = `rgba(255,255,255,${(a * 0.3).toFixed(3)})`;
+      g.beginPath();
+      g.arc(x, y, size * 1.7, 0, Math.PI * 2);
+      g.fill();
       g.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
-      g.fillRect(x - size / 2, y - size / 2, size, size);
+      g.beginPath();
+      g.arc(x, y, Math.max(0.5, size * 0.6), 0, Math.PI * 2);
+      g.fill();
     }
     g.globalCompositeOperation = 'source-over';
     this.lightsTex.needsUpdate = true;
@@ -229,6 +235,9 @@ export class Globe {
     u.footCos.value = footCos;
     u.camPos.value.copy(camPos);
     u.time.value = time;
+    // Up close the blurry night-lights picture would smear: the 3D city takes over.
+    const alt = camPos.length() - R_EARTH;
+    u.lightsFade.value = Math.min(1, Math.max(0.0, (alt - 15) / 150));
     this.stars.position.copy(camPos);
   }
 }

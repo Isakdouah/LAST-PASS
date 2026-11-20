@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { distanceKm, inWindow, localTime, MPLS, nightOver, passCentre, rateAt, subPoint, untilWindow, WINDOW } from './clock';
+import { distanceKm, inWindow, localTime, MPLS, nightOver, passCentre, rateAt, realSeconds, subPoint, untilWindow, WINDOW } from './clock';
 
 describe('orbit clock', () => {
   it('opens six windows, at 20:00 and then every 92 minutes', () => {
@@ -19,5 +19,11 @@ describe('orbit clock', () => {
     expect(rateAt(passCentre(1) + 2700)).toBe(300);
     expect(Math.abs(rateAt(passCentre(1) + WINDOW + 1) - rateAt(passCentre(1) + WINDOW))).toBeLessThan(6);
     expect(untilWindow(passCentre(1) + WINDOW + 10)).toBeGreaterThan(80 * 60);
+  });
+});
+
+describe('realSeconds after the last pass', () => {
+  it('returns Infinity instead of looping forever', () => {
+    expect(realSeconds(0, Infinity)).toBe(Infinity);
   });
 });
