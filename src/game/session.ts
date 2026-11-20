@@ -11,7 +11,7 @@ import { CityMap, loadMap, MapFile } from '../map/loadMap';
 import { cleanPlaces, NamedPlace } from '../map/places';
 import { createFires, Fires, stepFires } from '../sim/fire';
 import { cloneWorld, count, DEFAULT_RULES, Env, step, World } from '../sim/outbreak';
-import { enterStreet, Kind, leaveStreet, newAgent, stepStreet, Street } from '../sim/street';
+import { enterStreet, equip, Kind, leaveStreet, newAgent, stepStreet, Street } from '../sim/street';
 import type { Sound } from '../audio';
 import { eventsBetween, WorldEvent } from './world';
 import { createHeroStates, escapeAt, escapeChance, heroById, HeroState, HEROES, setRouter } from './heroes';
@@ -117,6 +117,11 @@ function roads(): Uint8Array {
   }
   return (roadGrid = g);
 }
+/** Can a car drive here? (On the road grid, about 10 m squares.) */
+export const onRoad = (x: number, y: number) => {
+  const X = Math.floor(x * OCC), Y = Math.floor(y * OCC);
+  return X >= 0 && Y >= 0 && X < GW * OCC && Y < GH * OCC && roads()[Y * GW * OCC + X] === 1;
+};
 /** A street route between two points (map cells): A* over the 10 m building grid, keeping
  *  away from walls, then straightened where there is a clear line. Vehicles never cut
  *  through buildings (see heroes.test.ts). */
@@ -465,14 +470,17 @@ export class Session {
           while (k-- > 0) s.agents.push(newAgent(...freeSpot(x, y), Kind.Dead));
           const h = w.healthy[i];
           if (h > 0) {
+            // Whoever arrives came by road, running: they are outside, and drawn.
             const ammoEach = w.armed[i] > 0 ? w.ammo[i] / w.armed[i] : 0;
             let n = Math.floor(h / s.scale + Math.random());
             while (n-- > 0) {
               const armed = Math.random() < w.armed[i] / h;
-              s.agents.push(newAgent(...freeSpot(x, y), Kind.Living, armed ? Math.max(1, Math.round(ammoEach)) : 0));
+              const a = equip(newAgent(...freeSpot(x, y), Kind.Living, armed ? Math.max(1, Math.round(ammoEach)) : 0), Math.random, w.know[i]);
+              a.fear = 1;
+              s.agents.push(a);
             }
           }
-          w.infected[i] = w.healthy[i] = w.armed[i] = w.ammo[i] = 0;
+          w.infected[i] = w.healthy[i] = w.armed[i] = w.ammo[i] = w.moving[i] = w.crawl[i] = 0;
         }
     }
   }
@@ -491,12 +499,12 @@ export class Session {
     const mx = Math.ceil(vw * 0.3) + 1, my = Math.ceil(vh * 0.3) + 1;
     const x0 = Math.max(0, Math.floor(box.x0) - mx), y0 = Math.max(0, Math.floor(box.y0) - my);
     const x1 = Math.min(GW, Math.ceil(box.x1) + mx), y1 = Math.min(GH, Math.ceil(box.y1) + my);
-    this.street = enterStreet(this.world, x0, y0, x1 - x0, y1 - y0, MAX_AGENTS, this.tick + 1, policeCells, blocked);
+    this.street = enterStreet(this.world, x0, y0, x1 - x0, y1 - y0, MAX_AGENTS, this.tick + 1, policeCells, blocked, this.env());
     const w = this.world;
     for (let y = y0; y < y1; y++)
       for (let x = x0; x < x1; x++) {
         const i = y * GW + x;
-        w.healthy[i] = w.infected[i] = w.armed[i] = w.ammo[i] = 0;
+        w.healthy[i] = w.infected[i] = w.armed[i] = w.ammo[i] = w.moving[i] = w.crawl[i] = 0;
       }
   }
 
@@ -506,6 +514,26 @@ export class Session {
     // Local TV breaks in around 9 PM; phones and radio carry it from there (guess).
     const news = Math.max(0, Math.min(1, (this.t - 4800) / 7200));
     return { hour, dark: 0.8, news };
+  }
+
+  /** Cars that drove out of the street area join the city numbers just outside it, still on the road. */
+  private drainExits(s: Street) {
+    if (!s.exits.length) return;
+    const w = this.world;
+    const cx = s.x0 + s.w / 2, cy = s.y0 + s.h / 2;
+    for (const e of s.exits) {
+      let x = Math.floor(e.x), y = Math.floor(e.y);
+      const dx = e.x - cx, dy = e.y - cy;
+      if (Math.abs(dx) * s.h > Math.abs(dy) * s.w) x = dx > 0 ? s.x0 + s.w : s.x0 - 1;
+      else y = dy > 0 ? s.y0 + s.h : s.y0 - 1;
+      x = Math.max(0, Math.min(GW - 1, x));
+      y = Math.max(0, Math.min(GH - 1, y));
+      const i = y * GW + x;
+      w.healthy[i] += s.scale;
+      w.moving[i] += s.scale;
+      if (e.armed) (w.armed[i] += s.scale), (w.ammo[i] += e.ammo * s.scale);
+    }
+    s.exits.length = 0;
   }
 
   heroState(id: string): HeroState | undefined {
@@ -632,7 +660,8 @@ export class Session {
     this.setZone(this.canLook() ? zone : null);
     const s = this.street;
     if (s && streetVisible) {
-      stepStreet(s, this.world, this.tick * 7919 + Math.floor(now), Math.min(0.3, gameDt), blocked);
+      stepStreet(s, this.world, this.tick * 7919 + Math.floor(now), Math.min(0.3, gameDt), blocked, this.env(), onRoad);
+      this.drainExits(s);
     }
     this.updateSmoke(gameDt, zone);
     const { group, signal } = tuned(this.radio);

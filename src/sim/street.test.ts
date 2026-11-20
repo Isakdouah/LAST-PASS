@@ -10,23 +10,26 @@ function block() {
 }
 
 describe('street level', () => {
-  it('turns cell numbers into people and back without losing anyone', () => {
+  it('turns cell numbers into people and back without losing anyone; most stay indoors', () => {
     const w = block();
+    const before = 400 * 10 + 10;
     const s = enterStreet(w, 0, 0, 20, 20, 10_000);
-    expect(s.agents.length).toBeGreaterThan(3900);
-    expect(s.agents.length).toBeLessThan(4100);
+    const drawn = s.agents.filter((a) => a.kind === Kind.Living).length * s.scale;
+    let inside = 0;
+    for (const v of s.indoor) inside += v;
+    expect(inside).toBeGreaterThan(drawn * 3); // a cold October evening: most are at home
     leaveStreet(s, w);
     let total = 0;
     for (let i = 0; i < 400; i++) total += w.healthy[i] + w.infected[i] + w.fallen[i];
-    expect(total).toBeCloseTo(s.agents.length * s.scale, 0);
+    expect(total).toBeCloseTo(before, -1);
   });
 
   it('the dead catch people and people run', () => {
     const w = block();
     const s = enterStreet(w, 0, 0, 20, 20, 10_000);
     const deadAtStart = s.agents.filter((a) => a.kind === Kind.Dead).length;
-    for (let t = 0; t < 200; t++) stepStreet(s, w, t);
-    const deadNow = s.agents.filter((a) => a.kind === Kind.Dead).length;
+    for (let t = 0; t < 600; t++) stepStreet(s, w, t);
+    const deadNow = s.agents.filter((a) => a.kind === Kind.Dead || (a.kind === Kind.Living && a.turn >= 0)).length;
     expect(deadNow).toBeGreaterThan(deadAtStart);
     expect(s.agents.some((a) => a.kind === Kind.Living && a.fear > 0.5)).toBe(true);
   });
@@ -67,6 +70,7 @@ describe('street level', () => {
     w.healthy.fill(10);
     w.armed.fill(2);
     w.ammo.fill(40);
+    w.moving.fill(10); // everyone out on the street, so everyone is drawn
     const s = enterStreet(w, 0, 0, 20, 20, 200); // about 20 people per dot
     const living = s.agents.filter((a) => a.kind === Kind.Living);
     const armed = living.filter((a) => a.ammo > 0).length;
