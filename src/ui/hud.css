@@ -40,6 +40,9 @@ html, body { margin: 0; height: 100%; background: #04050a; overflow: hidden; }
 #hud .label { position: absolute; font-size: 12px; line-height: 14px; color: var(--bright); white-space: nowrap; transform: translate(-50%, -100%); text-shadow: 1px 1px 0 #000; }
 #hud .label.place { color: var(--ink); }
 #hud .label.contact { color: var(--mark); }
+#hud .label.town { color: var(--ink); opacity: 0.85; padding-bottom: 4px; }
+#hud .label.town::after { content: ''; position: absolute; left: 50%; bottom: 0; width: 2px; height: 2px; margin-left: -1px; background: currentColor; }
+#hud .label.town.big { color: var(--bright); opacity: 1; }
 #dial { position: relative; height: 10px; background: #1c2030; margin: 6px 0; }
 #dial i { position: absolute; top: 5px; width: 2px; height: 5px; background: var(--mark); }
 #dial b { position: absolute; top: 0; width: 2px; height: 10px; background: var(--fire); }

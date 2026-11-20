@@ -34,7 +34,7 @@ export class Hud {
     this.sub = mk('sub');
     this.keys = mk('keys');
     this.credit = mk('credit');
-    this.credit.innerHTML = 'Map data © OpenStreetMap contributors (ODbL) · city lights: GeoNames (CC BY 4.0)';
+    this.credit.innerHTML = 'Map data © OpenStreetMap contributors (ODbL) · place names + city lights: GeoNames (CC BY 4.0)';
     this.screen = document.createElement('div');
     this.screen.id = 'screenText';
     document.body.appendChild(this.screen);
@@ -109,6 +109,16 @@ export class Hud {
     this.keys.innerHTML = info.keys;
   }
 
+  /** Screen boxes of the visible panels, so map names keep out of them. */
+  panels() {
+    const out: { x0: number; y0: number; x1: number; y1: number }[] = [];
+    for (const d of [this.clock, this.radio, this.hint, this.sub, this.keys, this.credit]) {
+      if (!d.textContent || d.offsetParent === null) continue;
+      const r = d.getBoundingClientRect();
+      if (r.width > 0) out.push({ x0: r.left - 4, y0: r.top - 4, x1: r.right + 4, y1: r.bottom + 4 });
+    }
+    return out;
+  }
   /** Map labels: call begin, then label() for each, then end. */
   beginLabels() {
     this.labelsUsed = 0;

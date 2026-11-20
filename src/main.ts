@@ -2,6 +2,7 @@
 // Three ways to look: from the Cupola (your seat, looking down at the Earth), from outside
 // the station, and through the telescope, which zooms smoothly from the whole planet to
 // one street corner. You can only see and talk to Minneapolis while it is in sight.
+import { worldNames, BIG, type Placed } from './engine/placeLabels';
 import './ui/hud.css';
 import * as THREE from 'three';
 import { Sound } from './audio';
@@ -430,7 +431,7 @@ function start(m: 'play' | 'sandbox') {
     tele.jumpTo(MPLS.lat, MPLS.lon, 8);
     hud.say('', 'Sandbox (developer): click the ground to start an outbreak. 5-8 change speed, R resets.', 6);
   } else {
-    hud.say('', `Friday 16 October 2009, 19:40 in Minneapolis. ${playerName}, you are alone on the station. It comes over the city at 20:00.`, 9);
+    hud.say('', `Friday 16 October 2009, 19:40 in Minneapolis and St Paul. ${playerName}, you are alone on the station. It comes over the city at 20:00.`, 9);
     setTimeout(() => {
       if (mode === 'play') hud.say('', 'Scroll in to look through the telescope. Arrow keys tune the radio. 1 Cupola, 2 outside, 3 telescope.', 9);
     }, 9000);
@@ -443,7 +444,7 @@ function titleText() {
     <div>You can look, listen, speak and connect people.</div><br>
     <div class="mark">[Enter] begin</div><br>
     <div class="small">Headphones on. Rough draft 2: names, voices and lines are placeholders.<br>
-    Map data © OpenStreetMap contributors (ODbL). City lights: GeoNames (CC BY 4.0). Numbers are estimates.</div>`;
+    Map data © OpenStreetMap contributors (ODbL). Place names and city lights: GeoNames (CC BY 4.0). Numbers are estimates.</div>`;
 }
 function endText() {
   const { alive, dead, fallen } = game.totals();
@@ -698,6 +699,9 @@ function hintText(): string {
   return '';
 }
 
+let towns: Placed[] = [], townsAt = 0;
+const mplsText = () => (inWindow(game.t) ? '+ MINNEAPOLIS' : '+ Minneapolis (out of sight)');
+const SKIP_TOWNS = new Set(['Minneapolis']);
 /** Names on the map: Minneapolis and the station from orbit; stations, hospitals and contacts up close. */
 function drawLabels() {
   const W = window.innerWidth, H = window.innerHeight;
@@ -708,11 +712,33 @@ function drawLabels() {
   };
   const camPos = pose.pos;
   const alt = camPos.length() - R_EARTH;
+  if (view === 'tele' && alt > 2.5) {
+    // Town names: re-chosen a few times a second, moved with the globe every frame.
+    const now = performance.now();
+    if (now - townsAt > 150) {
+      townsAt = now;
+      const avoid = hud.panels();
+      // Keep clear of the Minneapolis and station markers too.
+      const marks: [THREE.Vector3, string][] = [[ecef(MPLS.lat, MPLS.lon, 0), mplsText()], [station(game.t).pos, `▲ ${playerName.toUpperCase()} (ISS)`]];
+      for (const [m, text] of marks) {
+        const p = m.clone().normalize().dot(camPos.clone().sub(m)) > 0 ? toScreen(m, camGlobe) : null;
+        const w = (text.length * 7) / 2 + 6;
+        if (p) avoid.push({ x0: p.x - w, y0: p.y - 22, x1: p.x + w, y1: p.y + 2 });
+      }
+      towns = worldNames().pick(camPos, (v) => toScreen(v, camGlobe), W, H, pose.fov, 60, alt > 25 ? SKIP_TOWNS : undefined, avoid);
+    }
+    const names = worldNames().list, v = new THREE.Vector3();
+    for (const t of towns) {
+      const n = names[t.i];
+      const p = toScreen(ecef(n.lat, n.lon, 0, v), camGlobe);
+      if (p) hud.label(p.x, p.y - 3, n.code >= BIG ? n.name.toUpperCase() : n.name, n.code >= BIG ? 'town big' : 'town');
+    }
+  } else towns = [];
   if (view === 'tele' && alt > 25) {
     const m = ecef(MPLS.lat, MPLS.lon, 0);
     if (m.clone().normalize().dot(camPos.clone().sub(m)) > 0) {
       const p = toScreen(m, camGlobe);
-      if (p) hud.label(p.x, p.y - 6, inWindow(game.t) ? '+ MINNEAPOLIS' : '+ Minneapolis (out of sight)', 'contact');
+      if (p) hud.label(p.x, p.y - 6, mplsText(), 'contact');
     }
     const st = station(game.t).pos;
     if (alt > 400 && st.clone().normalize().dot(camPos.clone().sub(st)) > 0) {
@@ -783,6 +809,12 @@ requestAnimationFrame(frame);
       if (v > best) (best = v), (bi = i);
     }
     return { x: (bi % GW) + 0.5, y: Math.floor(bi / GW) + 0.5, v: best };
+  },
+  /** Point the telescope at a place on Earth from d km. */
+  lookAt: (lat: number, lon: number, d: number) => {
+    setView('tele');
+    blend = 1;
+    tele.jumpTo(lat, lon, d);
   },
   /** Point the telescope at a map cell from d km. */
   lookCell: (x: number, y: number, d: number) => {
