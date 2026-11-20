@@ -105,3 +105,7 @@ html, body { margin: 0; height: 100%; background: #04050a; overflow: hidden; }
 #card .logt { color: var(--mark); margin-top: 8px; }
 #card .ph { font-size: 11px; opacity: 0.6; margin-top: 6px; }
 #card .close { text-align: right; color: var(--ink); font-size: 13px; cursor: pointer; padding: 4px 2px; }
+#card .dollhouse { margin-top: 10px; background: rgba(8, 10, 16, 0.92); border: 1px solid #2a2e3a; padding: 8px 10px; }
+#card .dollhouse .dht { color: var(--ink); font-size: 14px; margin-bottom: 6px; }
+#card .dollhouse img { width: 100%; image-rendering: pixelated; display: block; }
+#card .dollhouse .dhn { font-size: 12px; opacity: 0.7; margin-top: 4px; }

@@ -10,6 +10,7 @@ import { HEROES, routeCells, escapeAt } from '../game/heroes';
 import { query, Shapes, TILE } from '../map/detail';
 import { Kind, Role, Street } from '../sim/street';
 import { asleepShare } from '../sim/outbreak';
+import { drizzle } from '../game/weather';
 
 const HALF_W = (GW * CELL_X) / 2;
 const HALF_H = (GH * CELL_Y) / 2;
@@ -827,6 +828,17 @@ export class CityLayer {
               1.0, 0.25 + 0.6 * hot * hot, 0.05 + 0.2 * hot * hot * hot, hot * 0.9 * this.alpha);
           }
         }
+    }
+    // Drizzle near the camera (16 Oct 2009 had a little; the hours are a guess).
+    const rain = drizzle(s.env().hour);
+    if (rain > 0 && d < 1.2 && this.alpha > 0.5) {
+      const nr = Math.floor(900 * rain);
+      for (let k = 0; k < nr; k++) {
+        const h1 = hash(k * 7 + 1), h2 = hash(k * 13 + 5), h3 = hash(k * 29 + 3);
+        const fall = (time * (0.9 + h3 * 0.3) + h1) % 1;
+        cellToLocal(look.x + (h1 - 0.5) * 10 * d, look.y + (h2 - 0.5) * 10 * d, p);
+        add(p.x, 40 * (1 - fall), p.z, 1.2, 0.6, 0.66, 0.78, 0.35);
+      }
     }
     const st = s.street;
     if (st) {

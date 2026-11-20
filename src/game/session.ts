@@ -15,7 +15,8 @@ import { enterStreet, equip, Kind, leaveStreet, newAgent, stepStreet, Street } f
 import type { Sound } from '../audio';
 import { eventsBetween, WorldEvent } from './world';
 import { createHeroStates, escapeAt, escapeChance, heroById, HeroState, HEROES, setRouter } from './heroes';
-import { createRumours, rumourById, rumourEffect, RumourState, RUMOURS } from './rumours';
+import { createRumours, rumourById, rumourEffect, RumourState } from './rumours';
+import { Building, createBuilding, learnFloors, stepBuilding } from '../sim/building';
 import { rng } from '../sim/outbreak';
 
 export const TICK = 60; // game seconds per city-wide step (docs/tuning.md)
@@ -117,6 +118,16 @@ function roads(): Uint8Array {
     }
   }
   return (roadGrid = g);
+}
+/** How many floors the tallest building at a cell has (about 3.6 m a floor). */
+function floorsAt(x: number, y: number, fallback: number): number {
+  const s = det.buildings;
+  let h = 0;
+  for (let k = 0; k < s.count; k++) {
+    const cx = (s.box[k * 4] + s.box[k * 4 + 2]) / 2, cy = (s.box[k * 4 + 1] + s.box[k * 4 + 3]) / 2;
+    if (Math.abs(cx - x) < 1 && Math.abs(cy - y) < 1) h = Math.max(h, s.meta[k]);
+  }
+  return h > 0 ? Math.max(3, Math.min(12, Math.round(h / 3.6))) : fallback;
 }
 /** Can a car drive here? (On the road grid, about 10 m squares.) */
 export const onRoad = (x: number, y: number) => {
@@ -305,6 +316,8 @@ export class Session {
   /** Your "aim for the head" broadcast: when, and whether you had proof. */
   headcast: { tick: number; proof: boolean } | null = null;
   rumours: RumourState[] = createRumours();
+  /** Inside the buildings where a hero is (the dollhouse view). */
+  buildings = new Map<string, Building>();
   newsQueue: WorldEvent[] = [];
   news: WorldEvent[] = [];
   nextNews = 0;
@@ -332,6 +345,12 @@ export class Session {
     this.news = [];
     this.heroes = createHeroStates();
     this.rumours = createRumours();
+    this.buildings = new Map();
+    if (m === 'play') {
+      // Rosa: HCMC, fourth floor, east stairwell. Mai: Pioneer Hall, third floor.
+      this.buildings.set('rosa', createBuilding('rosa', 'HCMC, the Red Building', floorsAt(96.8, 121.8, 8), 140, 3, 3));
+      this.buildings.set('dorms', createBuilding('dorms', 'Pioneer Hall', floorsAt(128.5, 119.5, 4), 160, 2, 5));
+    }
     this.proof = false;
     this.seenGetUps = 0;
     this.headcast = null;
@@ -520,6 +539,7 @@ export class Session {
     });
     this.moveHeroes();
     this.spreadHeadcast();
+    this.stepInside();
     this.tick++;
     const s = this.street;
     if (s) {
@@ -576,6 +596,27 @@ export class Session {
     const news = Math.max(0, Math.min(1, (this.t - 4800) / 7200));
     const r = rumourEffect(this.rumours);
     return { hour, dark: 0.8, news, leave: r.leave, strife: r.strife };
+  }
+
+  /** Inside the hero buildings: the dead come in from the street and climb. People turned
+   *  inside join the dead on the block; what the hero tells you fills in the sketch. */
+  private stepInside() {
+    const w = this.world;
+    for (const [id, b] of this.buildings) {
+      const g = this.radio.groups.find((x) => x.id === id);
+      const hs = this.heroState(id);
+      if (!g) continue;
+      if (g.known) learnFloors(b, g.said);
+      if (hs && (hs.escapeStart >= 0 || hs.dead)) continue; // they are gone; the sketch stays as it was
+      const i = Math.floor(g.y) * GW + Math.floor(g.x);
+      let dead = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) dead += w.infected[i + dy * GW + dx] || 0;
+      const before = b.turned;
+      stepBuilding(b, dead, Math.max(w.aware[i], w.guard[i]), this.tick * 131 + 7);
+      const turned = Math.min(w.healthy[i], b.turned - before);
+      w.healthy[i] -= turned;
+      w.infected[i] += turned;
+    }
   }
 
   /** The broadcast spreads through radios, phones and word of mouth, one block at a time. */

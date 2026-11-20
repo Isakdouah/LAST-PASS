@@ -18,6 +18,7 @@ import { Hud, esc } from './ui/hud';
 import { WorldFx } from './engine/worldfx';
 import { darkness } from './game/world';
 import { HEROES, heroById, routeCells as routeCellsOf, escapeAt as escapeAtOf, seenAs } from './game/heroes';
+import { drawDollhouse } from './ui/dollhouse';
 import { cardHtml, drawPortrait } from './ui/card';
 
 const canvas = document.getElementById('screen') as HTMLCanvasElement;
@@ -180,6 +181,15 @@ function renderCard() {
   if (!h || !st) return;
   const gr = game.radio.groups.find((g) => g.id === cardId);
   cardEl.innerHTML = cardHtml(h, st, gr, portraitUrl(cardId, !!gr && gr.known));
+  // The dollhouse: only for a hero inside a building, once you have talked to them.
+  const b = game.buildings.get(cardId);
+  if (b && gr && gr.known) {
+    const inside = st.escapeStart < 0 && !st.dead;
+    const img = drawDollhouse(b, inside, thermal, performance.now() / 1000).toDataURL();
+    const first = h.name.split(' ')[0];
+    const note = inside ? `Sketch from what ${first} tells you. Grey floors: no news yet${thermal ? ' (thermal shows warm shapes)' : ' (T: thermal)'}.` : `${first} is not in the building any more. Last known.`;
+    cardEl.querySelector('.notes')?.insertAdjacentHTML('beforebegin', `<div class="dollhouse"><div class="dht">Inside: ${b.name}</div><img src="${img}" alt=""><div class="dhn">${note}</div></div>`);
+  }
   cardEl.querySelector('.close')?.addEventListener('click', closeCard);
   cardShown = performance.now();
 }
