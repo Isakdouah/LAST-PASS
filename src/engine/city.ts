@@ -32,7 +32,7 @@ void main() {
   #include <logdepthbuf_vertex>
 }`;
 const GROUND_F = /* glsl */ `${LOG_F}
-uniform sampler2D map; uniform sampler2D over;
+uniform sampler2D map; uniform sampler2D over; uniform sampler2D overS;
 uniform vec2 grid; uniform vec2 cellM; uniform float time; uniform float alpha; uniform float dots; uniform float thermal;
 uniform float edgeFade;
 varying vec2 vUv; varying vec3 vW;
@@ -41,16 +41,17 @@ void main() {
   #include <logdepthbuf_fragment>
   vec2 cp = vec2(vW.x / cellM.x + grid.x * 0.5, vW.z / cellM.y + grid.y * 0.5);
   vec4 o = texture2D(over, (floor(cp) + 0.5) / grid);
+  vec4 os = texture2D(overS, cp / grid);
   vec3 col = texture2D(map, vUv).rgb;
-  float dark = o.a;
+  float dark = smoothstep(0.2, 0.8, os.a);
   // Power out: the sodium light is gone, only starlight.
   float warm = max(0.0, col.r - col.b);
   vec3 off = col - vec3(warm * 0.85, warm * 0.55, 0.0);
   col = mix(col, off * vec3(0.7, 0.75, 1.0), dark);
   // Fire light on the ground.
-  float f = o.r;
-  float flick = 0.75 + 0.25 * sin(time * 9.0 + h21(floor(cp)) * 40.0);
-  col += vec3(0.9, 0.32, 0.06) * f * flick * 0.55;
+  float f = os.r;
+  float flick = 0.8 + 0.2 * sin(time * 9.0 + cp.x * 3.0) * sin(time * 6.1 + cp.y * 2.0);
+  col += vec3(0.9, 0.32, 0.06) * f * f * flick * 0.6;
   // The crowd as dots (where people are not simulated one by one).
   if (dots > 0.01) {
     vec2 sp = cp * 7.0;
@@ -86,14 +87,15 @@ void main() {
   #include <logdepthbuf_vertex>
 }`;
 const BLD_F = /* glsl */ `${LOG_F}
-uniform sampler2D over; uniform vec2 grid; uniform vec2 cellM; uniform float time; uniform float thermal;
+uniform sampler2D over; uniform sampler2D overS; uniform vec2 grid; uniform vec2 cellM; uniform float time; uniform float thermal;
 varying vec3 vW; varying vec3 vN; varying float vU; varying float vSeed; varying float vH;
 ${HASH}
 void main() {
   #include <logdepthbuf_fragment>
   vec2 cp = vec2(vW.x / cellM.x + grid.x * 0.5, vW.z / cellM.y + grid.y * 0.5);
   vec4 o = texture2D(over, (floor(cp) + 0.5) / grid);
-  float dark = o.a, fire = o.r;
+  vec4 os = texture2D(overS, cp / grid);
+  float dark = smoothstep(0.2, 0.8, os.a), fire = o.r, glow = os.r;
   float flick = 0.7 + 0.3 * sin(time * 11.0 + vSeed * 50.0) * sin(time * 7.3 + vW.y);
   // Building colours: brick, concrete, painted wood, by building.
   float k = fract(vSeed * 7.13);
@@ -125,7 +127,7 @@ void main() {
     wc = mix(wc, vec3(1.0, 0.45, 0.1) * flick * 1.3, step(0.5, fire) * step(r, 0.8));
     col = mix(col, wc, win);
   }
-  col += vec3(0.9, 0.3, 0.05) * fire * flick * (roof ? 0.4 : 0.45) * exp(-vW.y / 25.0);
+  col += vec3(0.9, 0.3, 0.05) * glow * flick * (roof ? 0.4 : 0.5) * exp(-vW.y / 30.0);
   if (thermal > 0.5) col = vec3(0.08 + 0.05 * float(roof)) + vec3(0.6) * fire;
   gl_FragColor = vec4(col, 1.0);
 }`;
@@ -190,6 +192,7 @@ const COL = {
 export class CityLayer {
   scene = new THREE.Scene();
   overTex: THREE.DataTexture;
+  private overSmooth: THREE.DataTexture;
   private over: Uint8Array;
   private shared: Record<string, THREE.IUniform>;
   private base: THREE.Mesh;
@@ -216,8 +219,15 @@ export class CityLayer {
     this.overTex.minFilter = THREE.NearestFilter;
     this.overTex.flipY = false;
     this.overTex.needsUpdate = true;
+    // The same numbers, smoothly blended between cells: for fire glow and power cuts.
+    this.overSmooth = new THREE.DataTexture(this.over, GW, GH, THREE.RGBAFormat);
+    this.overSmooth.magFilter = THREE.LinearFilter;
+    this.overSmooth.minFilter = THREE.LinearFilter;
+    this.overSmooth.flipY = false;
+    this.overSmooth.needsUpdate = true;
     this.shared = {
       over: { value: this.overTex },
+      overS: { value: this.overSmooth },
       grid: { value: new THREE.Vector2(GW, GH) },
       cellM: { value: new THREE.Vector2(CELL_X, CELL_Y) },
       time: { value: 0 },
@@ -311,6 +321,7 @@ export class CityLayer {
       o[j + 3] = s.isDark(i) ? 255 : 0;
     }
     this.overTex.needsUpdate = true;
+    this.overSmooth.needsUpdate = true;
   }
 
   /**
@@ -511,8 +522,9 @@ export class CityLayer {
         cellToLocal(sm.x, sm.y, p);
         const life = sm.age / sm.life;
         const fade = Math.min(1, sm.age / 4) * (1 - life);
-        const shade = 0.16 + 0.12 * hash(Math.floor(sm.x * 1000));
-        add(p.x, sm.alt, p.z, 18 + sm.age * 1.4, shade * 1.1, shade, shade * 0.92, 0.55 * fade * this.alpha);
+        const shade = 0.22 + 0.14 * hash(Math.floor(sm.x * 1000));
+        const lit = Math.max(0, 1 - sm.alt / 120); // fire light from below on young smoke
+        add(p.x, sm.alt, p.z, 22 + sm.age * 1.6, shade * 1.1 + lit * 0.35, shade + lit * 0.12, shade * 0.92, 0.6 * fade * this.alpha);
       }
       // Flames on burning roofs near where we look.
       const R = Math.ceil(THREE.MathUtils.clamp(d * 14, 6, 40));
@@ -521,13 +533,16 @@ export class CityLayer {
         for (let x = Math.max(0, Math.floor(look.x) - R); x < Math.min(GW, look.x + R); x++) {
           const i = y * GW + x;
           if (f[i] < 0.2) continue;
-          const nf = Math.ceil(f[i] * 6);
+          const nf = Math.ceil(f[i] * 14);
           const top = Math.max(4, cellHeight[i]);
           for (let k = 0; k < nf; k++) {
-            const h1 = hash(i * 31 + k), h2 = hash(i * 17 + k * 5);
-            const ph = (time * (0.8 + h1) + h2) % 1;
-            cellToLocal(x + h1, y + h2, p);
-            add(p.x, top + ph * 9 * f[i], p.z, (10 + 12 * f[i]) * (1 - ph * 0.6), 1.0, 0.35 + 0.4 * (1 - ph), 0.08, (1 - ph) * 0.95 * this.alpha);
+            const h1 = hash(i * 31 + k), h2 = hash(i * 17 + k * 5), h3 = hash(i * 7 + k * 11);
+            const ph = (time * (0.9 + h1 * 1.4) + h2) % 1;
+            cellToLocal(x + 0.15 + h1 * 0.7, y + 0.15 + h2 * 0.7, p);
+            const hot = 1 - ph;
+            // Flame tongues: yellow at the base, red, then dark at the tip.
+            add(p.x + (h3 - 0.5) * 4 * ph, top * (0.6 + 0.4 * h3) + ph * (6 + 10 * f[i]), p.z, (3 + 6 * f[i]) * (1 - ph * 0.5),
+              1.0, 0.25 + 0.6 * hot * hot, 0.05 + 0.2 * hot * hot * hot, hot * 0.9 * this.alpha);
           }
         }
     }

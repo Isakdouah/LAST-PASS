@@ -37,6 +37,10 @@ const sunLight = new THREE.DirectionalLight(0xfff4e0, 2.4);
 stationScene.add(sunLight, sunLight.target);
 const earthGlow = new THREE.HemisphereLight(0x1a2234, 0x2a3a5a, 0.5);
 stationScene.add(earthGlow);
+// In Earth's shadow the real station is nearly black; a soft fill (as if from the
+// floodlights and the glow below) keeps it readable. A game choice, not physics.
+const fill = new THREE.DirectionalLight(0x8090b0, 0.0);
+stationScene.add(fill, fill.target);
 const cupolaShell = iss.root.children.find((c) => c instanceof THREE.Group && c.position.distanceTo(iss.cupolaAt) < 1.0);
 // Orbit path in the globe scene.
 const trackGeo = new THREE.BufferGeometry();
@@ -493,7 +497,9 @@ function frame(now: number) {
   const inShadow = s.pos.dot(sun) < 0 && s.pos.clone().addScaledVector(sun, -s.pos.dot(sun)).length() < R_EARTH;
   sunLight.position.copy(sunLocal).multiplyScalar(100);
   sunLight.intensity = inShadow ? 0 : 2.4;
-  earthGlow.intensity = inShadow ? 0.35 : 0.8;
+  earthGlow.intensity = inShadow ? 1.1 : 0.8;
+  fill.intensity = inShadow ? 0.9 : 0.2;
+  fill.position.copy(camStation.position).add(new THREE.Vector3(0, 40, 0));
   for (const a of iss.arrays) a.rotation.z = Math.atan2(sunLocal.x, sunLocal.y);
   iss.lights.visible = Math.floor(time * 1.2) % 2 === 0;
   const inside = playing && view === 'cupola' && blend > 0.6;
