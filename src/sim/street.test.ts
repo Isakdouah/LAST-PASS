@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createWorld } from './outbreak';
-import { enterStreet, Kind, leaveStreet, newAgent, stepStreet, Street } from './street';
+import { enterStreet, Kind, leaveStreet, newAgent, newStreet, Role, stepStreet } from './street';
 
 function block() {
   const w = createWorld(20, 20);
@@ -44,7 +44,7 @@ describe('street level', () => {
 
   it('armed people shoot the dead and use up ammo', () => {
     const w = createWorld(10, 10);
-    const s: Street = { x0: 0, y0: 0, w: 10, h: 10, scale: 1, agents: [] };
+    const s = newStreet(0, 0, 10, 10);
     s.agents.push(newAgent(5, 5, Kind.Living, 30));
     for (let k = 0; k < 10; k++) s.agents.push(newAgent(5.6 + k * 0.05, 5, Kind.Dead));
     for (let t = 0; t < 120; t++) stepStreet(s, w, t);
@@ -54,7 +54,7 @@ describe('street level', () => {
 
   it('scared unarmed people run to someone armed', () => {
     const w = createWorld(20, 20);
-    const s: Street = { x0: 0, y0: 0, w: 20, h: 20, scale: 1, agents: [] };
+    const s = newStreet(0, 0, 20, 20);
     const guard = newAgent(8, 10, Kind.Living, 500);
     const runner = newAgent(10, 10, Kind.Living);
     s.agents.push(guard, runner, newAgent(11.2, 10, Kind.Dead));
@@ -72,5 +72,21 @@ describe('street level', () => {
     const armed = living.filter((a) => a.ammo > 0).length;
     expect(armed / living.length).toBeGreaterThan(0.1);
     expect(armed / living.length).toBeLessThan(0.3);
+  });
+
+  it('bullets are real: they fly over time, and gunfire draws the dead', () => {
+    const w = createWorld(20, 20);
+    const s = newStreet(0, 0, 20, 20);
+    s.agents.push(newAgent(10, 10, Kind.Living, 50, Role.Police));
+    s.agents.push(newAgent(10.6, 10, Kind.Dead));
+    const far = newAgent(14, 10, Kind.Dead); // out of sight (316 m), but can hear shots
+    s.agents.push(far);
+    let sawBulletInFlight = false;
+    for (let t = 0; t < 40; t++) {
+      stepStreet(s, w, t);
+      if (s.bullets.length > 0) sawBulletInFlight = true;
+    }
+    expect(sawBulletInFlight).toBe(true);
+    expect(far.x).toBeLessThan(14 - 0.5);
   });
 });

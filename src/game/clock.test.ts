@@ -1,0 +1,23 @@
+import { describe, expect, it } from 'vitest';
+import { distanceKm, inWindow, localTime, MPLS, nightOver, passCentre, rateAt, subPoint, untilWindow, WINDOW } from './clock';
+
+describe('orbit clock', () => {
+  it('opens six windows, at 20:00 and then every 92 minutes', () => {
+    expect(localTime(passCentre(0))).toBe('20:00');
+    expect(localTime(passCentre(1))).toBe('21:32');
+    expect(inWindow(passCentre(3))).toBe(true);
+    expect(inWindow(passCentre(3) + WINDOW + 5)).toBe(false);
+    expect(nightOver(passCentre(5) + WINDOW + 60)).toBe(true);
+  });
+  it('the station is right over Minneapolis at closest approach and far away between passes', () => {
+    expect(distanceKm(subPoint(passCentre(2)), MPLS)).toBeLessThan(5);
+    expect(distanceKm(subPoint(passCentre(2) + WINDOW), MPLS)).toBeLessThan(1700);
+    expect(distanceKm(subPoint(passCentre(2) + 2700), MPLS)).toBeGreaterThan(8000);
+  });
+  it('time runs slow in the window and fast on the far side, with no jumps', () => {
+    expect(rateAt(passCentre(1))).toBe(3);
+    expect(rateAt(passCentre(1) + 2700)).toBe(150);
+    expect(Math.abs(rateAt(passCentre(1) + WINDOW + 1) - rateAt(passCentre(1) + WINDOW))).toBeLessThan(5);
+    expect(untilWindow(passCentre(1) + WINDOW + 10)).toBeGreaterThan(80 * 60);
+  });
+});

@@ -48,7 +48,7 @@ function bytes(b64: string): Uint8Array {
   return out;
 }
 
-export function loadMap(file: MapFile): CityMap {
+export function loadMap(file: MapFile, override?: Place[]): CityMap {
   const { width, height } = file;
   const world = createWorld(width, height);
   world.land.set(bytes(file.layers.land));
@@ -63,11 +63,11 @@ export function loadMap(file: MapFile): CityMap {
     world.armed[i] = world.healthy[i] * ARMED_SHARE;
     world.ammo[i] = world.armed[i] * HOME_AMMO;
   }
-  const places: Place[] = (file.places ?? []).map(([x, y, kind]) => ({ x, y, kind: kind as PlaceKind }));
+  const places: Place[] = override ?? (file.places ?? []).map(([x, y, kind]) => ({ x, y, kind: kind as PlaceKind }));
   // Police stations: officers with far more ammunition, spread over the station and its block.
   for (const p of places) {
     if (p.kind !== 'police') continue;
-    const i = p.y * width + p.x;
+    const i = Math.floor(p.y) * width + Math.floor(p.x);
     if (!world.land[i]) continue;
     world.healthy[i] += POLICE_OFFICERS;
     world.armed[i] += POLICE_OFFICERS;

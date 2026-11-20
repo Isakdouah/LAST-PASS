@@ -17,6 +17,8 @@ export interface World {
   armed: Float32Array;
   /** Rounds of ammunition held in the cell. */
   ammo: Float32Array;
+  /** 0..1: how ready the block is (warned, barricaded). Cuts bites by 80% and doubles hits at 1. */
+  guard: Float32Array;
 }
 
 export interface Rules {
@@ -48,6 +50,7 @@ export function createWorld(width: number, height: number): World {
     fallen: new Float32Array(n),
     armed: new Float32Array(n),
     ammo: new Float32Array(n),
+    guard: new Float32Array(n),
   };
 }
 
@@ -91,7 +94,7 @@ export function step(w: World, rules: Rules = DEFAULT_RULES): World {
     if (z <= 0 || h <= 0) continue;
     // Guns: shots limited by ammo; each hit puts one of the dead down.
     const shots = Math.min(ammo[i], armed[i] * rules.fireRate);
-    const shotDown = Math.min(z, shots * rules.accuracy);
+    const shotDown = Math.min(z, shots * rules.accuracy * (1 + w.guard[i]));
     ammo[i] -= shots;
     // Bare hands and tools: a small share of the dead put down.
     const struck = Math.min(z - shotDown, (z - shotDown) * rules.resistance * (h / (h + z)));
@@ -99,7 +102,7 @@ export function step(w: World, rules: Rules = DEFAULT_RULES): World {
     fallen[i] += shotDown + struck;
     // Bites: the fewer the dead after the shooting, the fewer bites.
     const contact = z / (h + z);
-    const turned = Math.min(h, h * rules.bite * contact);
+    const turned = Math.min(h, h * rules.bite * contact * (1 - 0.8 * w.guard[i]));
     armed[i] *= h > 0 ? 1 - turned / h : 0;
     h -= turned;
     healthy[i] = h;
@@ -136,5 +139,5 @@ export function step(w: World, rules: Rules = DEFAULT_RULES): World {
   }
   for (let i = 0; i < infected.length; i++) infected[i] = Math.max(0, infected[i] + moved[i]);
 
-  return { width, height, land, road, healthy, infected, fallen, armed, ammo };
+  return { width, height, land, road, healthy, infected, fallen, armed, ammo, guard: w.guard };
 }
