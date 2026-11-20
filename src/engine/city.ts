@@ -909,7 +909,7 @@ export function drawGround(g: CanvasRenderingContext2D, x0: number, y0: number, 
 
 /** Extruded buildings whose centre is in tile (x0,y0): walls with an along-wall coordinate
  *  for windows, and a flat roof. Returns null when the tile has none. */
-function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.BufferGeometry | null {
+export function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.BufferGeometry | null {
   const P: number[] = [], N: number[] = [], U: number[] = [], S: number[] = [], H: number[] = [];
   const I: number[] = [];
   const v = new THREE.Vector3();
@@ -942,15 +942,16 @@ function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.BufferGeomet
       const len = a.distanceTo(b);
       if (len < 0.05) continue;
       // Outward normal in x/z.
-      const nx = ((b.y - a.y) / len) * -sign, nz = ((a.x - b.x) / len) * -sign;
+      // (A counter-clockwise ring has its inside on the left of each edge, so outward is to the right.)
+      const nx = ((b.y - a.y) / len) * sign, nz = ((a.x - b.x) / len) * sign;
       const base = P.length / 3;
       P.push(a.x, 0, a.y, b.x, 0, b.y, b.x, h, b.y, a.x, h, a.y);
       for (let q = 0; q < 4; q++) N.push(nx, 0, nz), S.push(seed), H.push(h);
       U.push(u, u + len, u + len, u);
       u += len;
       // Wind each wall so its front faces outward (back faces are skipped when drawing).
-      if (sign > 0) I.push(base, base + 1, base + 2, base, base + 2, base + 3);
-      else I.push(base, base + 2, base + 1, base, base + 3, base + 2);
+      if (sign > 0) I.push(base, base + 2, base + 1, base, base + 3, base + 2);
+      else I.push(base, base + 1, base + 2, base, base + 2, base + 3);
     }
     const tris = THREE.ShapeUtils.triangulateShape(ring, []);
     const base = P.length / 3;
