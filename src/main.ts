@@ -7,6 +7,7 @@ import detailFile from './data/detail.json';
 import { Sound } from './audio';
 import {
   fmt,
+  realSeconds,
   inWindow,
   localTime,
   MPLS,
@@ -50,6 +51,15 @@ canvas.width = W;
 canvas.height = H;
 const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 ctx.imageSmoothingEnabled = false;
+// Keep the 16:9 picture whole on any window: the biggest fit, centred.
+function fit() {
+  const k = Math.min(window.innerWidth / W, window.innerHeight / H);
+  const s = k >= 2 ? Math.floor(k) : k; // whole-number scaling when big enough (sharper pixels)
+  canvas.style.width = `${Math.floor(W * s)}px`;
+  canvas.style.height = `${Math.floor(H * s)}px`;
+}
+fit();
+window.addEventListener('resize', fit);
 
 // ---------- data ----------
 const places: NamedPlace[] = cleanPlaces((detailFile as unknown as DetailFile).places);
@@ -264,7 +274,7 @@ canvas.addEventListener(
           view = 'city';
           cam.z = cam.targetZ = MIN_Z;
           clampCam();
-        } else say('', `Minneapolis is below the horizon. Next pass in ${fmt(untilWindow(t) / rateAt(t + 1))} (real time).`, 3);
+        } else say('', `Minneapolis is below the horizon. Next pass in ${fmt(realSeconds(t, t + untilWindow(t)))}.`, 3);
       }
       return;
     }
@@ -352,7 +362,7 @@ function syncStreetFirst() {
 function doWarn() {
   const { group, signal } = tuned(radio);
   if (!radioUp()) return say('', 'No line of sight. The radio only reaches Minneapolis during a pass.', 3);
-  if (!group || signal < 0.5) return say('', 'Tune to someone first (arrow keys or the mouse wheel over the dial).', 3);
+  if (!group || signal < 0.75) return say('', 'Tune to someone first (arrow keys or the mouse wheel over the dial).', 3);
   syncStreetFirst();
   const reply = warn(radio, world, group, tick, tick * 31 + 7);
   talk(group, reply);
@@ -360,7 +370,7 @@ function doWarn() {
 function doPatch() {
   const { group, signal } = tuned(radio);
   if (!radioUp()) return say('', 'No line of sight. The radio only reaches Minneapolis during a pass.', 3);
-  if (!group || signal < 0.5) return say('', 'Tune to someone first.', 3);
+  if (!group || signal < 0.75) return say('', 'Tune to someone first.', 3);
   if (!radio.patchFrom) {
     radio.patchFrom = group;
     return say('', `Patch: holding ${group.name}. Tune to a second channel and press P again.`, 5);
@@ -747,12 +757,17 @@ function drawAgents(s: Street) {
 // ---------- smoke ----------
 function updateSmoke(gameDt: number) {
   const b = visibleBox();
-  const want = Math.min(900, 120 + (cam.z > 20 ? 300 : 0));
+  const want = 900;
   for (let y = Math.max(0, Math.floor(b.y0)); y < Math.min(GH, b.y1 + 6); y++)
     for (let x = Math.max(0, Math.floor(b.x0) - 6); x < Math.min(GW, b.x1); x++) {
       const f = fires.fire[y * GW + x];
-      if (f > 0.25 && smoke.length < want && Math.random() < f * 0.05 * Math.min(4, gameDt * 4))
-        smoke.push({ x: x + Math.random(), y: y + Math.random(), alt: 5, age: 0, life: 40 + Math.random() * 50 });
+      if (f > 0.25 && smoke.length < want && Math.random() < f * 0.8 * Math.min(1, gameDt))
+      {
+        // Born at a random point of its life, so a plume is already standing when you look.
+        const life = 40 + Math.random() * 50;
+        const age = smoke.length < want / 2 ? Math.random() * life * 0.7 : 0;
+        smoke.push({ x: x + Math.random() + (2.2 * age) / M_PER_CELL, y: y + Math.random(), alt: 5 + 3.5 * age, age, life });
+      }
     }
   for (const p of smoke) {
     p.age += gameDt;
@@ -802,7 +817,7 @@ function finishMap() {
           const qx = Math.round(X + dx), qy = Math.round(Y + dy);
           if (qx < 0 || qy < 0 || qx >= VIEW_W || qy >= VIEW_H) continue;
           const tb = BAYER[((qy + MY) % 4) * 4 + ((qx + MX) % 4)];
-          if (fade * 0.4 > tb && (dx * dx + dy * dy) < r * r * (0.5 + fade * 0.5)) buf[qy * VIEW_W + qx] = dy < -r / 3 ? smokeL : smokeIdx;
+          if (fade * 0.75 > tb && (dx * dx + dy * dy) < r * r * (0.5 + fade * 0.5)) buf[qy * VIEW_W + qx] = dy < -r / 3 ? smokeL : smokeIdx;
         }
     }
   for (let q = 0; q < buf.length; q++) {
@@ -876,8 +891,8 @@ function panel() {
   line('LAST PASS', PAL.inkBright);
   if (mode === 'play') {
     line(`${localTime(t)} CDT  pass ${Math.min(PASSES, passIndex(t) + 1)}/${PASSES}`);
-    if (inWindow(t)) line(`IN SIGHT  ${fmt(windowLeft(t) / 3)} left`, PAL.mark);
-    else line(`far side  next ${fmt(untilWindow(t) / rateAt(t))}`, PAL.ink);
+    if (inWindow(t)) line(`IN SIGHT  ${fmt(realSeconds(t, t + windowLeft(t)))} left`, PAL.mark);
+    else line(`far side  next ${fmt(realSeconds(t, t + untilWindow(t)))}`, PAL.ink);
   } else {
     line(`sandbox  x${sandboxRate}`);
     line(`${Math.floor(t / 3600)}h${String(Math.floor((t % 3600) / 60)).padStart(2, '0')} of game time`);
@@ -904,7 +919,7 @@ function panel() {
     ctx.fillStyle = css(b < bars ? PAL.dead : PAL.built);
     ctx.fillRect(PX + b * 4, y + 6 - b, 3, 2 + b);
   }
-  text(up ? (group && signal > 0.5 ? (group.known ? group.name : 'a voice...') : 'static') : 'no line of sight', PX + 24, y, up ? PAL.inkBright : PAL.ink);
+  text(up ? (group && signal > 0.75 ? (group.known ? group.name : 'a voice...') : group && signal > 0.2 ? 'something faint...' : 'static') : 'no line of sight', PX + 24, y, up ? PAL.inkBright : PAL.ink);
   y += 11;
   if (radio.patchFrom) line(`patch: ${radio.patchFrom.name}`, PAL.mark);
   // Contacts.
@@ -947,6 +962,28 @@ function wrap(s: string, max: number): string[] {
   }
   if (cur) out.push(cur);
   return out;
+}
+// One quiet hint strip at the top of the view, depending on where you are in the night.
+function hintText(): string {
+  if (mode === 'sandbox') return '';
+  const known = radio.groups.filter((g) => g.known);
+  if (view === 'orbit')
+    return inWindow(t) ? 'Minneapolis is in sight. Scroll in on the yellow cross to look.' : 'Far side of the Earth. What you did shows up next pass.';
+  if (known.length === 0) return 'Radio: Up/Down tune fast, Left/Right fine. Hams use 146.52.';
+  if (radio.stats.patches === 0 && known.every((g) => g.warnedAt < 0) && radio.stats.warnRight + radio.stats.warnWrong === 0)
+    return 'W warns who you are tuned to. They decide if they believe you.';
+  if (!known.some((g) => g.kind === 'police')) return 'Police talk around 155 MHz. P + P patches two channels.';
+  if (cam.z < 40) return 'Zoom all the way in to see people fight. T: thermal camera.';
+  return '';
+}
+function drawHint() {
+  const h = hintText();
+  if (!h) return;
+  ctx.font = '8px monospace';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(MX, MY, VIEW_W, 11);
+  text(h, MX + 3, MY + 2, PAL.mark);
 }
 function drawSubtitle() {
   if (performance.now() > subtitle.until || !subtitle.text) return;
@@ -1077,7 +1114,7 @@ function simulate(realDt: number, now: number) {
       takePhoto();
       sound.hush();
       if (view === 'city') leaveCity();
-      say('', `Lost line of sight. Next pass in ${fmt(untilWindow(t) / rateAt(t + 200))}. Press C next pass to compare with this photo.`, 6);
+      say('', `Lost line of sight. Next pass in ${fmt(realSeconds(t, t + untilWindow(t)))}. Press C next pass to compare with this photo.`, 6);
     }
     wasWindow = open;
     if (nightOver(t)) {
@@ -1098,7 +1135,7 @@ function simulate(realDt: number, now: number) {
   const { group, signal } = tuned(radio);
   const up = radioUp();
   sound.setStatic(up ? 1 - signal * 0.8 : 0.35);
-  if (up && group && signal > 0.6 && now > nextTalk) {
+  if (up && group && signal > 0.75 && now > nextTalk) {
     const pass = mode === 'play' ? passIndex(t) : Math.min(5, Math.floor(tick / 60));
     talk(group, nextLine(radio, world, group, pass));
   }
@@ -1136,6 +1173,7 @@ function render(_now: number) {
     drawMarkers();
   }
   panel();
+  drawHint();
   drawSubtitle();
   if (paused) text('PAUSED', MX + VIEW_W / 2 - 14, MY + 4, PAL.mark);
 }

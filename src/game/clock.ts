@@ -13,7 +13,7 @@ export const FIRST_PASS = 20 * 60; // first closest approach, seconds after 19:4
 export const WINDOW = 3.5 * 60; // seconds either side of closest approach
 export const START = { h: 19, m: 40 }; // local time at t = 0
 /** Game seconds per real second. */
-export const RATE = { window: 3, far: 150 };
+export const RATE = { window: 2, far: 300 };
 
 const INC = (51.6 * Math.PI) / 180; // orbit inclination
 const EARTH_TURN = (2 * Math.PI) / 86164; // radians per second
@@ -90,4 +90,11 @@ export function distanceKm(a: { lat: number; lon: number }, b: { lat: number; lo
 export function fmt(sec: number): string {
   const s = Math.max(0, Math.round(sec));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** Real (wall-clock) seconds it takes for game time to run from a to b. */
+export function realSeconds(a: number, b: number): number {
+  let real = 0;
+  for (let x = a; x < b; x += 10) real += Math.min(10, b - x) / rateAt(x);
+  return real;
 }

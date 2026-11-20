@@ -50,7 +50,7 @@ export interface Radio {
 }
 
 export const DIAL = { min: 144, max: 163 };
-const TUNE = 0.06; // MHz either side where a voice comes through
+const TUNE = 0.25; // MHz either side where something comes through the static (clear above 0.75)
 
 /** Cells from lon/lat (same box as the map). */
 const cell = (lon: number, lat: number) => ({

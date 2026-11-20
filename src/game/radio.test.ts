@@ -15,6 +15,8 @@ describe('radio', () => {
     r.freq = 146.52;
     expect(tuned(r).group?.id).toBe('walt');
     r.freq = 146.7;
+    expect(tuned(r).signal).toBeLessThan(0.75); // faint: you hear something, not words
+    r.freq = 145.75;
     expect(tuned(r).group).toBeNull();
   });
   it('a group you warn decides for itself; if they trust you they gather and get ready', () => {

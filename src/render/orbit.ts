@@ -44,11 +44,13 @@ const DECL = -9 * D; // Sun declination in mid-October
 
 /** Projection set-up shared by drawing and by markers. */
 function frame(v: OrbitView, vw: number, vh: number) {
-  const R = 210;
+  // A big Earth whose horizon arcs across the top; the point under the station sits
+  // about 60% down the view, so the city is in the middle of the picture when in sight.
+  const R = 230;
   const cx = vw / 2;
-  const cy = vh - 40 + R * 0.38;
-  const lat0 = (v.sub.lat + 14) * D; // look ahead (north-east) so the horizon shows
-  const lon0 = (v.sub.lon + 10) * D;
+  const cy = vh / 2 + 170;
+  const lat0 = (v.sub.lat - 37) * D;
+  const lon0 = v.sub.lon * D;
   return { R, cx, cy, lat0, lon0 };
 }
 
