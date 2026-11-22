@@ -291,3 +291,26 @@ export function nearestRoad(net: RoadNet, x: number, y: number, range = 0.5): Ro
 
 /** The junction a car reaches driving edge e in direction dir (+1 = start to end). */
 export const endNode = (net: RoadNet, e: number, dir: number) => (dir > 0 ? net.eb[e] : net.ea[e]);
+
+/** Is (x, y) on a road's surface, or within `margin` metres of its edge? */
+export function nearAsphalt(net: RoadNet, x: number, y: number, margin = 0): boolean {
+  const R = 1;
+  for (let ty = Math.floor(y) - R; ty <= Math.floor(y) + R; ty++)
+    for (let tx = Math.floor(x) - R; tx <= Math.floor(x) + R; tx++) {
+      const l = net.tiles.get(tileKey(tx, ty));
+      if (!l) continue;
+      for (const e of l) {
+        const reach = (net.ewid[e] / 2 + margin) / net.M;
+        const r2 = reach * reach;
+        for (let j = net.eoff[e]; j + 1 < net.eoff[e + 1]; j++) {
+          const ax = net.pts[j * 2], ay = net.pts[j * 2 + 1], bx = net.pts[j * 2 + 2], by = net.pts[j * 2 + 3];
+          if (Math.min(ax, bx) - reach > x || Math.max(ax, bx) + reach < x || Math.min(ay, by) - reach > y || Math.max(ay, by) + reach < y) continue;
+          const dx = bx - ax, dy = by - ay;
+          const L2 = dx * dx + dy * dy || 1e-9;
+          const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2));
+          if ((ax + dx * t - x) ** 2 + (ay + dy * t - y) ** 2 < r2) return true;
+        }
+      }
+    }
+  return false;
+}

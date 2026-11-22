@@ -484,7 +484,7 @@ function endText() {
 let lastFrame = performance.now();
 let lastLights = -1;
 let lastOverlay = 0;
-let fpsAcc = 0, fpsN = 0, fps = 0, cpuAvg = 0;
+let fpsAcc = 0, fpsN = 0, fps = 0, cpuAvg = 0, slowSecs = 0;
 const tmp = new THREE.Vector3();
 const tPose = newPose();
 const cityLL = new Float32Array(cityLights.length * 2);
@@ -499,6 +499,13 @@ function frame(now: number) {
   if (fpsAcc > 1) {
     fps = fpsN / fpsAcc;
     fpsAcc = fpsN = 0;
+    // Auto quality: three slow seconds in a row and the picture gets a little coarser
+    // (540, 460, then 380 pixels tall). Add ?hq to the address to switch this off.
+    slowSecs = fps < 45 ? slowSecs + 1 : 0;
+    if (slowSecs >= 3 && px.lowHeight > 380 && !location.search.includes('hq')) {
+      px.setLowHeight(px.lowHeight - 80);
+      slowSecs = 0;
+    }
   }
   const time = now / 1000;
   const playing = mode === 'play' || mode === 'sandbox';

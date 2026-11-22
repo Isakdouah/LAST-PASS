@@ -34,8 +34,10 @@ SEE (telescope, thermal, compare passes, catch lies) / LISTEN (tune the dial, lo
 
 ## Art rules (Patrol-style pixel discipline)
 
-- Low internal resolution (about 270-340 px tall), upscaled with nearest-neighbour. No anti-aliasing, no smooth gradients.
-- Small fixed palette with ordered (Bayer) dithering.
+- Hard pixels: low internal resolution (aim about 540 real screen pixels tall, never less than 2 screen pixels per game pixel), upscaled with nearest-neighbour. No anti-aliasing.
+- Full colour (ISAK, 22 Nov 2026): no fixed palette, no Bayer dots on the picture (they made it look dated). Dithered dissolve is still used for fading things out (treetops over people).
+- Real light at night: sodium lamp pools, headlights, lit windows, fire glow. Fall colours: the night is 16 October.
+- Street detail ties the city together: sidewalks, boulevard grass, lawns, lane paint, crosswalks, block-built trees and lamp posts (placed by rule, see src/engine/props.ts).
 - Bleak palette: blue-black space, sodium-orange city light, ash grey, smoke brown; fire red is the main warm colour.
 - Quiet interface: one hint strip, small labels. Every number on a console is real (orbit time, next pass, local time below).
 - Civilians white dots, infected green dots (from Zombies Aren't Real's readability), but our own look.

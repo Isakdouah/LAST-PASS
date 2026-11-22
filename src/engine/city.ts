@@ -4,7 +4,10 @@
 // Close up: sharper ground tiles and real extruded buildings near the camera only,
 // the simulated people as little figures, bullets as tracers, blood, fire and smoke.
 import * as THREE from 'three';
-import { det, GW, GH, CELL_X, CELL_Y, Session, places, blocked } from '../game/session';
+import { det, GW, GH, CELL_X, CELL_Y, Session, places, blocked, roadNet } from '../game/session';
+import { lampSpots, paved, treeSpots } from './props';
+import { buildLamps, buildTrees, propMaterial, TileTrees } from './propMeshes';
+import { nearestRoad, pointAt } from '../sim/roadnet';
 import { CAR_COLOURS, SIZE, VEHICLE_SCALE, vehicleGeometry, VKind } from './vehicles';
 import { HEROES, routeCells, escapeAt } from '../game/heroes';
 import { query, Shapes, TILE } from '../map/detail';
@@ -182,6 +185,9 @@ interface Tile {
   ground: THREE.Mesh;
   bld: THREE.Mesh | null;
   cars: THREE.Mesh | null;
+  lamps: THREE.InstancedMesh | null;
+  /** Built a moment after the tile (they take a few hundredths of a second). */
+  trees: TileTrees | null;
   used: number;
 }
 const vehicleMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true });
@@ -306,6 +312,9 @@ export class CityLayer {
   private base: THREE.Mesh;
   private baseMat: THREE.ShaderMaterial;
   private bldMat: THREE.ShaderMaterial;
+  private propMat: THREE.ShaderMaterial;
+  /** Trees and lamps (1 = all; the auto quality may lower it). */
+  treeDensity = 1;
   private tiles = new Map<number, Tile>();
   private frameNo = 0;
   private agents: THREE.InstancedMesh;
@@ -367,6 +376,7 @@ export class CityLayer {
     // Everything in the city is in the 'transparent' list so draw order is just renderOrder:
     // ground first (no depth), then buildings, people, tracers, smoke.
     this.bldMat = new THREE.ShaderMaterial({ vertexShader: BLD_V, fragmentShader: BLD_F, uniforms: this.shared, transparent: true });
+    this.propMat = propMaterial(this.shared);
     // People: a little figure (body + head), lit from above by vertex shading.
     const mk = (geo: THREE.BufferGeometry) => {
       const im = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), 2600);
@@ -519,6 +529,7 @@ export class CityLayer {
         }
       list.sort((a, b) => a[1] - b[1]);
       let built = 0;
+      let treesBuilt = 0;
       const groundR = THREE.MathUtils.clamp(d * 1000 * 0.9, 500, 1600);
       for (const [key, dist] of list) {
         want.add(key);
@@ -529,6 +540,12 @@ export class CityLayer {
           built++;
         }
         if (tile) tile.used = this.frameNo;
+        // Trees for near tiles, one tile per frame (each takes a few hundredths of a second).
+        if (tile && !tile.trees && d < 3 && dist < groundR + tw && treesBuilt < 1 && built === 0) {
+          tile.trees = buildTrees(treeSpots(tile.key % 1000 * TILE, Math.floor(tile.key / 1000) * TILE, this.treeDensity), this.propMat, (x, y, o) => cellToLocal(x, y, o));
+          for (const m of tile.trees.meshes) this.scene.add(m);
+          treesBuilt++;
+        }
       }
     }
     for (const [key, tile] of this.tiles) {
@@ -536,11 +553,15 @@ export class CityLayer {
       tile.ground.visible = wantGround.has(key);
       if (tile.bld) tile.bld.visible = vis;
       if (tile.cars) tile.cars.visible = vis && d < 3;
+      if (tile.lamps) tile.lamps.visible = vis && d < 3;
+      if (tile.trees) for (const m of tile.trees.meshes) m.visible = vis && d < 3;
       (tile.ground.material as THREE.ShaderMaterial).uniforms.dots.value = dots;
       (tile.ground.material as THREE.ShaderMaterial).uniforms.alpha.value = this.alpha;
       if (!vis && this.frameNo - tile.used > 600) this.dropTile(tile);
     }
+    this.propMat.uniforms.alpha.value = this.alpha;
     this.updateStreet(s.street, time);
+    this.updateCanopy(s);
     this.updateHeroes(s, d, time);
     this.updatePoints(s, look, d, time);
     this.ptsMat.uniforms.scale.value = screenH / (2 * Math.tan(THREE.MathUtils.degToRad(fovDeg) / 2));
@@ -635,7 +656,9 @@ export class CityLayer {
       cars.renderOrder = 0.5;
       this.scene.add(cars);
     }
-    const tile = { key, ground, bld, cars, used: this.frameNo };
+    const lamps = buildLamps(lampSpots(x0, y0), this.propMat, (x, y, o) => cellToLocal(x, y, o));
+    if (lamps) this.scene.add(lamps);
+    const tile = { key, ground, bld, cars, lamps, trees: null, used: this.frameNo };
     this.tiles.set(key, tile);
     return tile;
   }
@@ -654,6 +677,17 @@ export class CityLayer {
       this.scene.remove(t.cars);
       t.cars.geometry.dispose();
     }
+    if (t.lamps) {
+      this.scene.remove(t.lamps);
+      t.lamps.geometry.dispose();
+      t.lamps.dispose();
+    }
+    if (t.trees)
+      for (const m of t.trees.meshes) {
+        this.scene.remove(m);
+        m.geometry.dispose();
+        m.dispose();
+      }
     this.tiles.delete(t.key);
   }
 
@@ -902,6 +936,48 @@ export class CityLayer {
     g.setDrawRange(0, n);
   }
 
+  /** Treetops dissolve where people are underneath (and around the heroes), so the
+   *  trees never hide what happens on the ground. */
+  private updateCanopy(s: Session) {
+    const st = s.street;
+    const G = 5 / CELL_X; // 5 m squares
+    const occ = new Set<number>();
+    const mark = (x: number, y: number) => occ.add(Math.floor(y / G) * 100000 + Math.floor(x / G));
+    if (st) for (const a of st.agents) if (a.kind !== Kind.Fallen && !a.gone) mark(a.x, a.y);
+    for (const [, f] of this.heroFig) if (f.visible) {
+      const c = localToCell(f.position);
+      mark(c.x, c.y);
+    }
+    for (const [, v] of this.heroVeh) if (v.visible) {
+      const c = localToCell(v.position);
+      mark(c.x, c.y);
+    }
+    for (const t of this.tiles.values()) {
+      if (!t.trees) continue;
+      const tx = (t.key % 1000) * TILE, ty = Math.floor(t.key / 1000) * TILE;
+      const overlaps = occ.size > 0 && (!st || (tx < st.x0 + st.w + 1 && tx + TILE > st.x0 - 1 && ty < st.y0 + st.h + 1 && ty + TILE > st.y0 - 1));
+      if (!overlaps && !t.trees.faded) continue;
+      t.trees.faded = false;
+      const touched = new Set<number>();
+      for (const tr of t.trees.list) {
+        let near = false;
+        if (occ.size) {
+          const gx = Math.floor(tr.x / G), gy = Math.floor(tr.y / G);
+          for (let dy = -1; dy <= 1 && !near; dy++) for (let dx = -1; dx <= 1 && !near; dx++) if (occ.has((gy + dy) * 100000 + gx + dx)) near = true;
+        }
+        const target = near ? 0.85 : 0;
+        if (target > 0 || tr.fade > 0) t.trees.faded = true;
+        if (Math.abs(target - tr.fade) < 0.01) continue;
+        tr.fade += (target - tr.fade) * 0.15;
+        if (Math.abs(target - tr.fade) < 0.02) tr.fade = target;
+        const at = t.trees.meshes[tr.m].geometry.attributes.aFade as THREE.InstancedBufferAttribute;
+        at.setX(tr.i, tr.fade);
+        touched.add(tr.m);
+      }
+      for (const m of touched) t.trees.meshes[m].geometry.attributes.aFade.needsUpdate = true;
+    }
+  }
+
   private thermal = false;
   setThermal(on: boolean) {
     this.thermal = on;
@@ -925,6 +1001,7 @@ function path(g: CanvasRenderingContext2D, s: Shapes, k: number, x0: number, y0:
 /** Night ground: dark earth, parks, lakes and the river, asphalt with sodium light pools,
  *  lane paint on big roads, and dark building footprints (roofs are drawn in 3D up close). */
 export function drawGround(g: CanvasRenderingContext2D, x0: number, y0: number, w: number, h: number, ppc: number) {
+  if (ppc >= 32) return drawStreetGround(g, x0, y0, w, h, ppc);
   const x1 = x0 + w, y1 = y0 + h;
   const mpp = CELL_X / ppc; // metres per pixel
   g.fillStyle = '#16171d';
@@ -1136,4 +1213,158 @@ function mergeGeoms(list: THREE.BufferGeometry[]): THREE.BufferGeometry {
   out.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
   out.setIndex(I);
   return out;
+}
+
+/** Up close (about 1 m per pixel): lawns and paved squares, boulevard grass and
+ *  sidewalks with kerbs, asphalt, lane paint, crosswalks at busy junctions, fallen
+ *  leaves, and the orange pools under each street lamp. Footprints stay dark (the 3D
+ *  buildings stand on them). */
+function drawStreetGround(g: CanvasRenderingContext2D, x0: number, y0: number, w: number, h: number, ppc: number) {
+  const x1 = x0 + w, y1 = y0 + h;
+  const mpp = CELL_X / ppc; // metres per pixel
+  const W = w * ppc, H = h * ppc;
+  // 1. Ground: lawns where houses stand, concrete where the city is dense.
+  for (let cy = y0; cy < y1; cy++)
+    for (let cx = x0; cx < x1; cx++) {
+      g.fillStyle = paved(cx + 0.5, cy + 0.5) ? '#232328' : '#17221a';
+      g.fillRect((cx - x0) * ppc, (cy - y0) * ppc, ppc + 1, ppc + 1);
+    }
+  // Grain: grass tufts and stains, in 2 px blocks so it stays pixel art.
+  for (let k = 0; k < w * h * 90; k++) {
+    const px = Math.floor(hash(k * 3 + x0) * W), py = Math.floor(hash(k * 5 + y0) * H);
+    const pv = paved(x0 + px / ppc, y0 + py / ppc);
+    const v = hash(k * 7 + x0 * 131 + y0 * 977);
+    g.fillStyle = pv ? `rgb(${30 + v * 10},${30 + v * 10},${35 + v * 10})` : `rgb(${18 + v * 14},${30 + v * 16},${20 + v * 8})`;
+    g.fillRect(px & ~1, py & ~1, 2, 2);
+  }
+  g.fillStyle = '#15281a';
+  for (const k of query(det.parks, x0, y0, x1, y1)) if (!det.parks.meta[k]) (path(g, det.parks, k, x0, y0, ppc), g.fill());
+  const water = query(det.water, x0, y0, x1, y1);
+  g.fillStyle = '#0b1a33';
+  for (const k of water) if (!det.water.meta[k]) (path(g, det.water, k, x0, y0, ppc), g.fill());
+  g.fillStyle = '#17221a';
+  for (const k of water) if (det.water.meta[k]) (path(g, det.water, k, x0, y0, ppc), g.fill());
+  // 2. Streets, in layers so crossings join cleanly: sidewalk, boulevard grass, kerb, asphalt.
+  const R = det.roads;
+  const roads = query(R, x0 - 0.3, y0 - 0.3, x1 + 0.3, y1 + 0.3).sort((a, b) => R.meta[a] - R.meta[b]);
+  const freeway = (wm: number) => wm === 22 || wm === 18 || wm === 9; // motorways, trunks, ramps
+  const boulevard = (k: number) => {
+    const wm = R.meta[k];
+    if (wm >= 15 || freeway(wm)) return false;
+    const o = R.off[k], mid = o + ((R.off[k + 1] - o) >> 1);
+    return !paved(R.xy[mid * 2], R.xy[mid * 2 + 1]);
+  };
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
+  const stroke = (k: number, widthM: number, style: string) => {
+    g.strokeStyle = style;
+    g.lineWidth = Math.max(1, widthM / mpp);
+    path(g, R, k, x0, y0, ppc);
+    g.stroke();
+  };
+  for (const k of roads) {
+    const wm = R.meta[k];
+    if (freeway(wm)) stroke(k, wm + 3, '#1d1d22'); // gravel shoulder
+    else stroke(k, wm + (boulevard(k) ? 9.8 : 7), '#3a3a40'); // sidewalk
+  }
+  for (const k of roads) if (boulevard(k)) stroke(k, R.meta[k] + 6.2, '#1b2a1d'); // grass strip
+  for (const k of roads) if (!freeway(R.meta[k])) stroke(k, R.meta[k] + 0.9, '#55555c'); // kerb
+  for (const k of roads) stroke(k, R.meta[k], R.meta[k] >= 15 ? '#2a2a31' : '#25252c');
+  // Sidewalk joints every few metres (pale lines across), only on the sidewalk band.
+  // 3. Lane paint.
+  const dash = (k: number, off: number, on: number, gap: number, style: string, wid = 0.2) => {
+    g.setLineDash(on ? [on / mpp, gap / mpp] : []);
+    g.strokeStyle = style;
+    g.lineWidth = Math.max(1, wid / mpp);
+    const o = R.off[k], n = R.off[k + 1] - o;
+    g.beginPath();
+    for (let j = 0; j < n; j++) {
+      // Offset sideways by `off` metres (perpendicular of the local direction).
+      const a = Math.max(0, j - 1), b = Math.min(n - 1, j + 1);
+      const dx = (R.xy[(o + b) * 2] - R.xy[(o + a) * 2]) * CELL_X, dy = (R.xy[(o + b) * 2 + 1] - R.xy[(o + a) * 2 + 1]) * CELL_Y;
+      const l = Math.hypot(dx, dy) || 1;
+      const px = (R.xy[(o + j) * 2] - x0) * ppc + ((-dy / l) * off) / mpp, py = (R.xy[(o + j) * 2 + 1] - y0) * ppc + ((dx / l) * off) / mpp;
+      g.lineTo(px, py);
+    }
+    g.stroke();
+  };
+  for (const k of roads) {
+    const wm = R.meta[k];
+    if (wm === 22 || wm === 18) {
+      // Freeway: white lane dashes and solid edge lines.
+      dash(k, wm / 2 - 1, 0, 0, 'rgba(200,200,190,0.45)');
+      dash(k, -wm / 2 + 1, 0, 0, 'rgba(200,200,190,0.45)');
+      dash(k, wm / 4, 3, 9, 'rgba(200,200,190,0.4)');
+      dash(k, -wm / 4, 3, 9, 'rgba(200,200,190,0.4)');
+    } else if (wm >= 15) {
+      // Double yellow down the middle.
+      dash(k, 0.25, 0, 0, 'rgba(210,170,60,0.55)', 0.15);
+      dash(k, -0.25, 0, 0, 'rgba(210,170,60,0.55)', 0.15);
+    } else if (wm >= 11) dash(k, 0, 3, 6, 'rgba(210,170,60,0.45)');
+  }
+  g.setLineDash([]);
+  // 4. Crosswalks: zebra stripes across each street at junctions of bigger streets.
+  const net = roadNet();
+  const nodes = new Set<number>();
+  for (const k of roads) {
+    const o = R.off[k], n = R.off[k + 1] - o;
+    for (let j = 0; j < n; j++) {
+      const x = R.xy[(o + j) * 2], y = R.xy[(o + j) * 2 + 1];
+      if (x < x0 || y < y0 || x >= x1 || y >= y1) continue;
+      const hit = nearestRoad(net, x, y, 0.02);
+      if (hit) nodes.add(hit.along < 0.5 ? net.ea[hit.edge] : net.elen[hit.edge] - hit.along < 0.5 ? net.eb[hit.edge] : -1);
+    }
+  }
+  g.fillStyle = 'rgba(205,205,195,0.5)';
+  for (const nd of nodes) {
+    if (nd < 0) continue;
+    const es = net.adj[nd];
+    if (es.length < 3) continue;
+    let big = 0, maxW = 0;
+    for (const e of es) (big = Math.max(big, net.ewid[e])), (maxW = Math.max(maxW, net.ewid[e]));
+    if (big < 11 || maxW >= 18) continue;
+    const nx = net.nodeX[nd], ny = net.nodeY[nd];
+    for (const e of es) {
+      const fromStart = net.ea[e] === nd;
+      const L = net.elen[e];
+      const at = Math.min(L * 0.45, maxW / 2 + 2.5);
+      const p = pointAt(net, e, fromStart ? at : L - at);
+      const dx = (p.x - nx) * CELL_X, dy = (p.y - ny) * CELL_Y, l = Math.hypot(dx, dy) || 1;
+      const ux = dx / l, uy = dy / l; // along the street, away from the junction
+      const half = net.ewid[e] / 2;
+      g.save();
+      g.translate((p.x - x0) * ppc, (p.y - y0) * ppc);
+      g.rotate(Math.atan2(uy, ux));
+      for (let s2 = -half + 0.4; s2 < half - 0.4; s2 += 1.2) g.fillRect(-1.5 / mpp, s2 / mpp, 3 / mpp, Math.max(1, 0.6 / mpp));
+      g.restore();
+    }
+  }
+  // 5. Fallen leaves on grass and sidewalks (16 October): orange, gold and brown specks.
+  const LEAF = ['#7a3a14', '#8a6418', '#5a2a14', '#6e4a1a'];
+  for (let k = 0; k < w * h * 160; k++) {
+    const px = Math.floor(hash(k * 11 + x0 * 7) * W), py = Math.floor(hash(k * 13 + y0 * 3) * H);
+    const cx = x0 + px / ppc, cy = y0 + py / ppc;
+    if (paved(cx, cy)) continue;
+    // Drifts: thicker in some patches.
+    if (hash(k * 17) > 0.35 + 0.5 * Math.sin(cx * 9.1) * Math.sin(cy * 7.7)) continue;
+    g.fillStyle = LEAF[Math.floor(hash(k * 19) * LEAF.length)];
+    g.fillRect(px, py, 1, 1);
+  }
+  // 6. Street lights: an orange pool under each lamp, a little out over the road.
+  g.globalCompositeOperation = 'lighter';
+  const rad = 15 / mpp;
+  for (const l of lampSpots(x0 - 0.3, y0 - 0.3, x1 + 0.3, y1 + 0.3)) {
+    const px = (l.x - x0) * ppc + (Math.cos(l.arm) * 2) / mpp, py = (l.y - y0) * ppc + (Math.sin(l.arm) * 2) / mpp;
+    const gr = g.createRadialGradient(px, py, 0, px, py, rad);
+    gr.addColorStop(0, 'rgba(150,88,28,0.55)');
+    gr.addColorStop(0.5, 'rgba(110,62,20,0.22)');
+    gr.addColorStop(1, 'rgba(110,62,20,0)');
+    g.fillStyle = gr;
+    g.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+  }
+  g.globalCompositeOperation = 'source-over';
+  // 7. Building footprints: dark (the 3D building stands on top).
+  const b = det.buildings;
+  g.fillStyle = '#0e0f13';
+  for (const k of query(b, x0, y0, x1, y1)) (path(g, b, k, x0, y0, ppc), g.fill());
 }

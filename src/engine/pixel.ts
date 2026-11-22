@@ -1,6 +1,7 @@
-// The pixel look: every layer renders into one small picture (about 360 px tall),
-// which is then snapped to the fixed palette with ordered (Bayer) dithering and
-// blown up with hard square pixels. Text is drawn separately, sharp, by the HUD.
+// The pixel look: every layer renders into one small picture (about 540 device pixels
+// tall), then blown up with hard square pixels, in full colour (ISAK's choice, 22 Nov
+// 2026: the old fixed palette with Bayer dots made it look dated). The palette code is
+// kept as a switch (usePalette) for comparison. Text is drawn separately, sharp, by the HUD.
 import * as THREE from 'three';
 
 /** Palette ramps (dark to light). The bleak night: blue-black space, sodium orange,
@@ -72,7 +73,7 @@ export class Pixel {
   h = 360;
   scale = 1;
 
-  constructor(public canvas: HTMLCanvasElement, public lowHeight = 360) {
+  constructor(public canvas: HTMLCanvasElement, public lowHeight = 540) {
     THREE.ColorManagement.enabled = false;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, logarithmicDepthBuffer: true, powerPreference: 'high-performance' });
     this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
@@ -91,7 +92,7 @@ export class Pixel {
         tScene: { value: this.target.texture },
         res: { value: new THREE.Vector2(this.w, this.h) },
         pal: { value: PALETTE.map((c) => new THREE.Vector3(c[0] / 255, c[1] / 255, c[2] / 255)) },
-        usePalette: { value: 1 },
+        usePalette: { value: 0 },
         spread: { value: 0.09 },
         thermal: { value: 0 },
       },
@@ -109,15 +110,26 @@ export class Pixel {
   }
 
   resize() {
+    // Work in real screen pixels (a laptop at 125% zoom has more of them than the page
+    // says), so the blow-up is a whole number of real pixels and every square is equal.
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.renderer.setPixelRatio(dpr);
     const W = window.innerWidth, H = window.innerHeight;
     this.renderer.setSize(W, H, true);
-    // Whole-number pixel blow-up when it fits, so every square pixel is the same size.
-    const s = Math.max(1, Math.round(H / this.lowHeight));
+    // At least 2 real pixels per game pixel, or the hard-pixel look disappears.
+    const s = Math.max(2, Math.round((H * dpr) / this.lowHeight));
     this.scale = s;
-    this.h = Math.ceil(H / s);
-    this.w = Math.ceil(W / s);
+    this.h = Math.ceil((H * dpr) / s);
+    this.w = Math.ceil((W * dpr) / s);
     this.target.setSize(this.w, this.h);
     this.uniforms.res.value.set(this.w, this.h);
+  }
+
+  /** Sharper or coarser picture (auto quality drops it when the laptop struggles). */
+  setLowHeight(h: number) {
+    if (h === this.lowHeight) return;
+    this.lowHeight = h;
+    this.resize();
   }
 
   begin(clear = 0x04050a) {
