@@ -9,7 +9,7 @@ import { lampSpots, paved, treeSpots } from './props';
 import { buildLamps, buildTrees, propMaterial, TileTrees } from './propMeshes';
 import { nearestRoad, pointAt } from '../sim/roadnet';
 import { CAR_COLOURS, SIZE, VEHICLE_SCALE, vehicleGeometry, VKind } from './vehicles';
-import { HEROES, routeCells, escapeAt } from '../game/heroes';
+import { HEROES } from '../game/heroes';
 import { query, Shapes, TILE } from '../map/detail';
 import { Kind, Role, Street } from '../sim/street';
 import { asleepShare } from '../sim/outbreak';
@@ -329,6 +329,8 @@ export class CityLayer {
   selected = '';
   private blood: THREE.InstancedMesh;
   private tracers: THREE.LineSegments;
+  /** Patched heroes: where they are going (dashes on the ground). */
+  private routeLine: THREE.LineSegments;
   private pts: THREE.Points;
   private ptsMat: THREE.ShaderMaterial;
   private tmpM = new THREE.Matrix4();
@@ -439,6 +441,12 @@ export class CityLayer {
     this.tracers.renderOrder = 2;
     this.tracers.frustumCulled = false;
     this.scene.add(this.tracers);
+    const rg = new THREE.BufferGeometry();
+    rg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6000 * 6), 3).setUsage(THREE.DynamicDrawUsage));
+    this.routeLine = new THREE.LineSegments(rg, new THREE.LineBasicMaterial({ color: 0xffd640, transparent: true, opacity: 0.9, depthTest: false }));
+    this.routeLine.renderOrder = 6;
+    this.routeLine.frustumCulled = false;
+    this.scene.add(this.routeLine);
     const pg = new THREE.BufferGeometry();
     const NP = 6000;
     pg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(NP * 3), 3).setUsage(THREE.DynamicDrawUsage));
@@ -563,6 +571,7 @@ export class CityLayer {
     this.updateStreet(s.street, time);
     this.updateCanopy(s);
     this.updateHeroes(s, d, time);
+    this.updateRoute(s, d, time);
     this.updatePoints(s, look, d, time);
     this.ptsMat.uniforms.scale.value = screenH / (2 * Math.tan(THREE.MathUtils.degToRad(fovDeg) / 2));
     void camLocal;
@@ -576,6 +585,36 @@ export class CityLayer {
     return null;
   }
 
+  /** Dashed lines along the patched heroes' way: to the meeting point, then out of the city.
+   *  The dashes crawl toward where they are going. */
+  private updateRoute(s: Session, d: number, time: number) {
+    const pos = this.routeLine.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const arr = pos.array as Float32Array;
+    const dash = Math.max(6, d * 14); // metres
+    let n = 0;
+    const a = new THREE.Vector3(), b = new THREE.Vector3();
+    for (const line of s.linkLines()) {
+      let phase = -((time * dash) % (dash * 2));
+      for (let i = 1; i < line.length && n < 5990; i++) {
+        cellToLocal(line[i - 1].x, line[i - 1].y, a, 3);
+        cellToLocal(line[i].x, line[i].y, b, 3);
+        const len = a.distanceTo(b);
+        let t = phase;
+        while (t < len && n < 5990) {
+          const t0 = Math.max(0, t), t1 = Math.min(len, t + dash);
+          if (t1 > t0) {
+            arr.set([a.x + ((b.x - a.x) * t0) / len, 3, a.z + ((b.z - a.z) * t0) / len, a.x + ((b.x - a.x) * t1) / len, 3, a.z + ((b.z - a.z) * t1) / len], n * 6);
+            n++;
+          }
+          t += dash * 2;
+        }
+        phase = t - len;
+      }
+    }
+    this.routeLine.geometry.setDrawRange(0, n * 2);
+    pos.needsUpdate = true;
+  }
+
   private updateHeroes(s: Session, d: number, time: number) {
     const close = d < 4 && this.alpha > 0.3;
     const y = new THREE.Vector3(0, 1, 0);
@@ -587,17 +626,14 @@ export class CityLayer {
         v.visible = f.visible = false;
         continue;
       }
-      const route = routeCells(h);
-      let at: { x: number; y: number; face: number };
-      if (hs.escapeStart >= 0) at = escapeAt(h, (s.tick - hs.escapeStart) * 60 + s.acc);
-      else at = { x: route[0].x, y: route[0].y, face: Math.atan2(route[1].y - route[0].y, route[1].x - route[0].x) };
+      const at = s.heroWhere(h.id, s.acc);
       cellToLocal(at.x, at.y, v.position);
       // Model faces +z (south); route angle is from +x (east) toward +y (south).
       v.quaternion.setFromAxisAngle(y, Math.PI / 2 - at.face);
       // Mai has no vehicle until the stranger's pickup stops for her.
-      v.visible = !(h.id === 'dorms' && hs.escapeStart < 0);
-      const onRoad = hs.escapeStart >= 0 && !hs.arrived;
-      f.visible = !hs.dead && !onRoad;
+      v.visible = !hs.out && !hs.riding && !(h.id === 'dorms' && (hs.escapeStart < 0 || hs.link));
+      const onRoad = at.moving;
+      f.visible = !hs.dead && !onRoad && !hs.out && !hs.riding;
       if (f.visible) {
         // Stand beside the vehicle door (or on the spot).
         const side = new THREE.Vector3(1, 0, 0).applyQuaternion(v.quaternion).multiplyScalar(v.visible ? 2.6 : 0);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { escapeAt, escapeChance, HEROES, routeCells } from './heroes';
+import { escapeAt, escapeChance, HEROES, leaveChance, routeCells } from './heroes';
 import { blocked, GH, GW, Session } from './session';
 
 const quiet = { start() {}, hush() {}, setStatic() {}, say() {}, shot() {}, muted: true } as never;
@@ -82,5 +82,53 @@ describe('heroes', () => {
     g2.luck = () => 0;
     g2.heroState('dorms')!.left = 0;
     expect(overrun(g2, 'dorms').hs.dead).toBe(true);
+  });
+
+  /** Play the patch out on a city with no dead in it (so nothing can go wrong on the road). */
+  function quietRun(a: string, b: string) {
+    const g = new Session(quiet);
+    g.reset('play');
+    g.mode = 'sandbox'; // radio up whatever the clock says
+    g.luck = () => 0; // they always agree
+    g.world.infected.fill(0);
+    const reply = g.linkHeroes(a, b);
+    for (let k = 0; k < 240; k++) {
+      g.world.infected.fill(0);
+      g.cityStep();
+      if (g.heroState(a)!.out && g.heroState(b)!.out) break;
+    }
+    return { g, reply, A: g.heroState(a)!, B: g.heroState(b)! };
+  }
+  it('patched heroes meet, then leave the city together', () => {
+    const { reply, A, B, g } = quietRun('rosa', 'walt');
+    expect(reply).toMatch(/together/);
+    expect(A.out && B.out).toBe(true);
+    expect(A.fate).toMatch(/escaped the city with/);
+    expect(B.fate).toMatch(/escaped the city with/);
+    // They really drove there: they end at the edge of the map.
+    const edge = (h: typeof A) => Math.min(h.x, h.y, GW - h.x, GH - h.y);
+    expect(edge(A)).toBeLessThan(3);
+    expect(A.log.some((l) => /Met|came for them/.test(l.text))).toBe(true);
+    expect(g.linkLines().length).toBe(0); // nothing left to draw
+  });
+  it('a hero with no car is picked up and rides out', () => {
+    const { A, B } = quietRun('dorms', 'rosa');
+    expect(A.riding).toBe(true);
+    expect(A.out && B.out).toBe(true);
+    expect(A.fate).toMatch(/riding with Rosa/);
+  });
+  it('they can say no', () => {
+    const g = new Session(quiet);
+    g.reset('play');
+    g.mode = 'sandbox';
+    g.luck = () => 1;
+    g.linkHeroes('walt', 'gloria');
+    expect(g.heroState('walt')!.link).toBeNull();
+    expect(g.radio.stats.refused).toBe(1);
+  });
+  it('waiting with the dead close, strangers give up on each other sooner than friends', () => {
+    expect(leaveChance({ bond: 0.3, danger: 0.8, waited: 3 })).toBeGreaterThan(leaveChance({ bond: 0.9, danger: 0.8, waited: 3 }));
+    expect(leaveChance({ bond: 0.3, danger: 0, waited: 3 })).toBe(0);
+    expect(leaveChance({ bond: 0.3, danger: 0, waited: 20 })).toBeGreaterThan(0); // nobody waits for ever
   });
 });

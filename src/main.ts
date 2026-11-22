@@ -6,7 +6,7 @@ import { worldNames, BIG, type Placed } from './engine/placeLabels';
 import './ui/hud.css';
 import * as THREE from 'three';
 import { Sound } from './audio';
-import { fmt, inWindow, localTime, MPLS, realSeconds, subPoint, untilWindow, passIndex } from './game/clock';
+import { fmt, inWindow, localTime, MPLS, realSeconds, subPoint, untilWindow, passIndex, passCentre, WINDOW } from './game/clock';
 import { tuned } from './game/radio';
 import { Box, GH, GW, Mode, places, Session, CELL_X, roadNet } from './game/session';
 import { Pixel } from './engine/pixel';
@@ -18,7 +18,7 @@ import { blendPose, Frame, lookQuat, newPose, Pose, Telescope, TELE } from './en
 import { Hud, esc } from './ui/hud';
 import { WorldFx } from './engine/worldfx';
 import { darkness } from './game/world';
-import { HEROES, heroById, routeCells as routeCellsOf, escapeAt as escapeAtOf, seenAs } from './game/heroes';
+import { EXITS, HEROES, heroById, seenAs } from './game/heroes';
 import { drawDollhouse } from './ui/dollhouse';
 import { cardHtml, drawPortrait } from './ui/card';
 
@@ -235,6 +235,41 @@ function heroAt(sx: number, sy: number): string {
   return best;
 }
 
+/** Hero blips on screen this frame (for clicking): id and screen position. */
+let blips: { id: string; x: number; y: number }[] = [];
+function blipAt(sx: number, sy: number): string {
+  let best = '', bd = 26;
+  for (const b of blips) {
+    const d = Math.hypot(b.x - sx, b.y - sy + 7);
+    if (d < bd) (bd = d), (best = b.id);
+  }
+  return best;
+}
+/** The hero you are holding on the line, waiting to patch to a second one. */
+let picked = '';
+const firstName = (id: string) => heroById(id)!.name.split(' ')[0];
+/** CONNECT by clicking: the first hero you click, you talk to; click a second one to patch them together. */
+function heroClick(id: string) {
+  const gr = game.radio.groups.find((g) => g.id === id)!;
+  const hs = game.heroState(id)!;
+  if (picked && picked !== id && !hs.dead && !hs.out) {
+    handAct.talk = 3;
+    game.linkSpeaker = id;
+    const reply = game.linkHeroes(picked, id);
+    game.talk(game.radio.groups.find((g) => g.id === game.linkSpeaker) ?? gr, reply);
+    picked = '';
+    closeCard();
+    return;
+  }
+  openCard(id);
+  if (hs.dead) return hud.say('', `${firstName(id)} does not answer.`, 3);
+  if (hs.out) return hud.say('', `${firstName(id)} is out of the city.`, 3);
+  picked = id;
+  game.setFreq(gr.freq);
+  handAct.tune = 1.2;
+  if (!hs.link) hud.say('', `On ${gr.freq.toFixed(2)} MHz with ${firstName(id)}. Click another hero to patch them together. Right-click lets go.`, 7);
+}
+
 let mode: Mode | 'name' = 'title';
 let drag: { x: number; y: number; moved: boolean; button: number } | null = null;
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -261,10 +296,14 @@ window.addEventListener('mousemove', (e) => {
   }
 });
 window.addEventListener('mouseup', (e) => {
+  if (drag && !drag.moved && (mode === 'play' || mode === 'sandbox') && view === 'tele' && drag.button === 2 && picked) {
+    picked = '';
+    hud.say('', 'Let go. Click a hero to talk to them.', 3);
+  }
   if (drag && !drag.moved && (mode === 'play' || mode === 'sandbox') && view === 'tele' && drag.button === 0) {
-    const id = game.canLook() && tele.d < 4 ? heroAt(e.clientX, e.clientY) : '';
+    const id = game.canLook() ? blipAt(e.clientX, e.clientY) || (tele.d < 4 ? heroAt(e.clientX, e.clientY) : '') : '';
     if (id) {
-      openCard(id);
+      heroClick(id);
       drag = null;
       return;
     }
@@ -337,7 +376,10 @@ window.addEventListener('keydown', (e) => {
     if (k === 'Escape') toTitle();
     return;
   }
-  if (k === 'Escape') return cardId ? closeCard() : toTitle();
+  if (k === 'Escape') {
+    if (picked) return void (picked = '');
+    return cardId ? closeCard() : toTitle();
+  }
   if (k === '1') setView('cupola');
   if (k === '2') setView('outside');
   if (k === '3') setView('tele');
@@ -443,15 +485,24 @@ function start(m: 'play' | 'sandbox') {
   look.yaw = 0;
   look.pitch = 0;
   blend = 1;
+  picked = '';
+  lastClose = -1;
+  reportEl.classList.remove('open');
+  if (m === 'play') {
+    // Start a few seconds before the first pass: the city has had its first quiet minutes.
+    const t0 = passCentre(0) - WINDOW - 6;
+    while (game.t < t0) {
+      game.t = Math.min(t0, game.t + 60);
+      game.cityStep();
+    }
+    game.wasWindow = false;
+  }
   if (m === 'sandbox') {
     view = 'tele';
     tele.jumpTo(MPLS.lat, MPLS.lon, 8);
     hud.say('', 'Sandbox (developer): click the ground to start an outbreak. 5-8 change speed, R resets.', 6);
   } else {
-    hud.say('', `Friday 16 October 2009, 19:40 in Minneapolis and St Paul. ${playerName}, you are alone on the station. It comes over the city at 20:00.`, 9);
-    setTimeout(() => {
-      if (mode === 'play') hud.say('', 'Scroll in to look through the telescope. Arrow keys tune the radio. 1 Cupola, 2 outside, 3 telescope.', 9);
-    }, 9000);
+    hud.say('', `Friday 16 October 2009, ${localTime(game.t)} in Minneapolis and St Paul. ${playerName}, you are alone on the station. The city is coming over the horizon.`, 7);
   }
 }
 function titleText() {
@@ -460,7 +511,7 @@ function titleText() {
     <div>You are the last one up here. You cannot move anyone.</div>
     <div>You can look, listen, speak and connect people.</div><br>
     <div class="mark">[Enter] begin</div><br>
-    <div class="small">Headphones on. Rough draft 2: names, voices and lines are placeholders.<br>
+    <div class="small">Headphones on. Rough draft 7: names, voices and lines are placeholders.<br>
     Map data © OpenStreetMap contributors (ODbL). Place names and city lights: GeoNames (CC BY 4.0). Numbers are estimates.</div>`;
 }
 function endText() {
@@ -649,6 +700,16 @@ function frame(now: number) {
   if (playing) {
     drawLabels();
     hud.update(game, { view, viewText: viewText(), hint: hintText(), keys: keysText(), name: playerName });
+    // The far side of the Earth goes by on fast forward.
+    const ff = mode === 'play' && game.mode === 'play' && !inWindow(game.t) && lastClose >= 0;
+    ffEl.style.display = ff ? 'block' : 'none';
+    // Coming round again: swoop back in to the station before the telescope drops onto the city.
+    if (ff && view === 'outside' && untilWindow(game.t) < 700)
+      orbitCam.dist = Math.exp(Math.log(orbitCam.dist) + (Math.log(40) - Math.log(orbitCam.dist)) * (1 - Math.exp(-realDt * 1.6)));
+    if (ff) {
+      const txt = `▸▸ FAST FORWARD<div class="sm">Far side of the Earth · ${localTime(game.t)} in Minneapolis · back over the city in ${fmt(realSeconds(game.t, game.t + untilWindow(game.t)))}</div>`;
+      if (ffEl.innerHTML !== txt) ffEl.innerHTML = txt;
+    }
   }
   hud.endLabels();
   if (cardId && now - cardShown > 500) renderCard();
@@ -722,6 +783,8 @@ function hintText(): string {
   const known = game.radio.groups.filter((g) => g.known);
   if (!inWindow(game.t)) return 'Far side of the Earth. What you did shows up next pass.';
   if (view !== 'tele') return 'Minneapolis is in sight. Scroll in for the telescope, G finds the city.';
+  if (picked) return `Holding ${firstName(picked)} on the line. Click a second hero to patch them together.`;
+  if (!game.heroes.some((h) => h.link)) return 'Click a hero to talk. Click a second one to patch them: they decide whether to meet and get out.';
   if (game.proof && (!game.headcast || !game.headcast.proof)) return 'You have proof now. H tells the whole city to aim for the head.';
   const rum = game.rumours.find((x) => x.active && x.seen && !x.debunked);
   if (rum) return 'You have seen it with your own eyes. D answers the rumour.';
@@ -790,33 +853,112 @@ function drawLabels() {
       if (p && p.x > 0 && p.x < W && p.y > 0 && p.y < H && v.distanceTo(camCity.position) < tele.d * 4000)
         hud.label(p.x, p.y, (pl.kind === 'police' ? '■ ' : pl.kind === 'fire' ? '▲ ' : '✚ ') + (pl.name || pl.kind), 'place');
     }
-    for (const g of game.radio.groups) {
-      if (!g.known || g.kind === 'broadcast' || g.kind === 'police') continue;
-      const hp = city.heroPos(g.id);
-      if (hp) v.copy(hp).setY(12);
-      else cellToLocal(g.x, g.y, v, 12);
-      const p = toScreen(v, camCity);
-      if (p && p.x > 0 && p.x < W && p.y > 0 && p.y < H) hud.label(p.x, p.y, `◆ ${g.name}`, 'contact');
+  }
+  // Your heroes: always marked during a pass, from street level up to the whole city.
+  blips = [];
+  if (view === 'tele' && (mode === 'play' || mode === 'sandbox') && game.canLook() && tele.d < 120) {
+    const v = new THREE.Vector3();
+    const near = tele.d < 8 && city.alpha > 0.5;
+    const at = (x: number, y: number, lift: number) => {
+      if (near) {
+        cellToLocal(x, y, v, lift);
+        return toScreen(v, camCity);
+      }
+      return toScreen(ecef(45.06 - (y / GH) * 0.19, -93.36 + (x / GW) * 0.36, 0, v), camGlobe);
+    };
+    for (const hero of HEROES) {
+      const st = game.heroState(hero.id)!;
+      if (st.riding) continue; // in someone else's vehicle
+      const w = game.heroWhere(hero.id);
+      const hp = near ? city.heroPos(hero.id) : null;
+      const p = hp ? toScreen(v.copy(hp).setY(12), camCity) : at(w.x, w.y, 12);
+      if (!p || p.x < 0 || p.x > W || p.y < 0 || p.y > H) continue;
+      // Two together on the same spot (out at the same exit): one label.
+      if (st.out && blips.some((b) => Math.hypot(b.x - p.x, b.y - p.y) < 30)) continue;
+      const rider = game.heroes.find((o) => o.riding && o.link?.with === hero.id);
+      const name = firstName(hero.id) + (rider ? ` + ${firstName(rider.id)}` : '');
+      const tag = st.dead ? ' · no contact' : st.out ? ' · out' : st.link ? (st.link.stage === 'waiting' ? ' · waiting' : ' · on the way') : '';
+      hud.label(p.x, p.y, `${st.dead ? '✕' : '◆'} ${name}${tag}`, `contact hero${picked === hero.id ? ' picked' : ''}${st.dead ? ' lost' : ''}`);
+      blips.push({ id: hero.id, x: p.x, y: p.y });
+    }
+    // Where patched heroes meet, and the way out they chose.
+    const shown = new Set<string>();
+    for (const st of game.heroes) {
+      const L = st.link;
+      if (!L || st.dead || st.out || L.role !== 'driver') continue;
+      if (L.stage === 'going') {
+        const p = at(L.meet.x, L.meet.y, 4);
+        if (p) hud.label(p.x, p.y, '▼ meet', 'contact');
+      }
+      if (!shown.has(L.exit)) {
+        shown.add(L.exit);
+        const e = game.exitCell(L.exit);
+        const p = at(e.x, e.y, 4);
+        if (p) hud.label(Math.max(60, Math.min(W - 60, p.x)), Math.max(40, Math.min(H - 10, p.y)), `⇢ ${EXITS.find((x) => x.id === L.exit)!.name} (city limits)`, 'contact');
+      }
     }
   }
 }
 
-// When the city goes over the horizon you are pulled back up into your seat; when it comes
-// back, the telescope (if you are in it) swings round to it.
+// When the city goes over the horizon you are pulled back out to the station, and the far
+// side of the Earth goes by on fast forward. When it comes back, the telescope drops straight
+// onto the city: onto your heroes, wherever they are now.
+let lastClose = -1;
 game.onWindow = (open: boolean) => {
   if (mode !== 'play') return;
   if (!open) {
-    if (view === 'tele') setView('cupola', 2.6);
+    lastClose = game.t;
+    picked = '';
+    closeCard();
+    orbitCam.dist = 9e6;
+    orbitCam.pitch = 0.5;
+    setView('outside', 2.6);
     return;
   }
-  if (view === 'tele') {
-    tele.follow = false;
-    tele.tLat = MPLS.lat;
-    tele.tLon = MPLS.lon;
-    tele.tD = 60;
-    tele.flying = true;
-  } else hud.say('', 'Minneapolis is in sight. Scroll in (or press G) to look.', 6);
+  // Aim at the heroes: the ones on the move if any, else all of them.
+  const live = game.heroes.filter((h) => !h.dead);
+  const moving = live.filter((h) => h.link && !h.out);
+  const pts = (moving.length ? moving : live.length ? live : game.heroes).map((h) => game.heroWhere(h.id));
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of pts) (x0 = Math.min(x0, p.x)), (y0 = Math.min(y0, p.y)), (x1 = Math.max(x1, p.x)), (y1 = Math.max(y1, p.y));
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const span = Math.max(x1 - x0, (y1 - y0) * 1.6) * 0.08; // km, roughly
+  if (view !== 'tele') setView('tele', 2.2);
+  tele.follow = false;
+  tele.tLat = 45.06 - (cy / GH) * 0.19;
+  tele.tLon = -93.36 + (cx / GW) * 0.36;
+  tele.tD = Math.max(2.5, Math.min(20, span * 1.4));
+  tele.flying = true;
+  if (lastClose >= 0) showReport();
+  else hud.say('', 'Your heroes are marked. Click one to talk to them; click a second to patch them together.', 9);
 };
+
+// ---------- "since your last pass" ----------
+const ffEl = document.createElement('div');
+ffEl.id = 'ff';
+document.body.appendChild(ffEl);
+const reportEl = document.createElement('div');
+reportEl.id = 'report';
+document.body.appendChild(reportEl);
+reportEl.addEventListener('click', () => reportEl.classList.remove('open'));
+let reportTimer = 0;
+function showReport() {
+  const from = lastClose;
+  let h = `<div class="rt">Since your last pass · ${localTime(from)} to ${localTime(game.t)}</div>`;
+  for (const hero of HEROES) {
+    const st = game.heroState(hero.id)!;
+    const news = st.log.filter((l) => l.t > from).map((l) => l.text.replace(/^\d\d:\d\d /, ''));
+    const head = st.dead ? 'lost' : st.out ? 'out of the city' : st.link ? (st.link.stage === 'waiting' ? 'waiting' : 'on the road') : st.arrived ? `safe for now, at ${hero.escape.to}` : st.escapeStart >= 0 ? 'on the road' : 'still holding out';
+    h += `<div class="rh${st.dead ? ' lost' : st.out ? ' out' : ''}"><b>${esc(hero.name)}</b> · ${head}</div>`;
+    if (news.length) h += `<div class="rl">${news.map((n) => esc(n)).join('<br>')}</div>`;
+  }
+  const lost = game.lossLog.length;
+  h += `<div class="rf">${lost ? `${lost} radio contact${lost > 1 ? 's' : ''} lost tonight. ` : ''}Click to close.</div>`;
+  reportEl.innerHTML = h;
+  reportEl.classList.add('open');
+  clearTimeout(reportTimer);
+  reportTimer = window.setTimeout(() => reportEl.classList.remove('open'), 40000);
+}
 
 requestAnimationFrame(frame);
 // Build the road network for cars while the title screen is up (it takes a moment).
@@ -839,12 +981,9 @@ setTimeout(() => roadNet(), 800);
   closeCard,
   clearSay: () => hud.clearSay(),
   city,
-  heroCell: (id: string) => {
-    const h = heroById(id)!;
-    const st = game.heroState(id)!;
-    const r = routeCellsOf(h);
-    return st.escapeStart >= 0 ? escapeAtOf(h, (game.tick - st.escapeStart) * 60) : r[0];
-  },
+  heroCell: (id: string) => game.heroWhere(id),
+  heroClick,
+  blips: () => blips,
   /** Average time per frame spent in our own code (ms), without the graphics card. */
   cpu: () => cpuAvg,
   jump: (seconds: number) => {

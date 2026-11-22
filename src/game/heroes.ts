@@ -269,8 +269,20 @@ const CELL_M = 80; // about 80 m per map cell (78.7 x 81.3)
 
 /** Where you are `secs` after starting the escape (map cells), and whether you have arrived. Pure. */
 export function escapeAt(h: Hero, secs: number): { x: number; y: number; face: number; arrived: boolean } {
-  const pts = routeCells(h);
-  let left = (Math.max(0, secs) * h.escape.kmh) / 3.6 / CELL_M; // cells travelled
+  return pathPoint(routeCells(h), (Math.max(0, secs) * h.escape.kmh) / 3.6 / CELL_M);
+}
+/** Cells a vehicle covers in `secs` at `kmh`. */
+export const cellsIn = (secs: number, kmh: number) => (Math.max(0, secs) * kmh) / 3.6 / CELL_M;
+/** Path length in cells. */
+export function pathLength(pts: { x: number; y: number }[]): number {
+  let n = 0;
+  for (let i = 1; i < pts.length; i++) n += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  return n;
+}
+/** The point `dist` cells along a path (and the way it faces). Pure. */
+export function pathPoint(pts: { x: number; y: number }[], dist: number): { x: number; y: number; face: number; arrived: boolean } {
+  if (pts.length === 1) return { x: pts[0].x, y: pts[0].y, face: 0, arrived: true };
+  let left = Math.max(0, dist);
   for (let i = 1; i < pts.length; i++) {
     const a = pts[i - 1], b = pts[i];
     const seg = Math.hypot(b.x - a.x, b.y - a.y);
@@ -295,6 +307,43 @@ export function escapeChance(o: { left: number; helpedAgo: number; vehicle: bool
 }
 
 /** What happens to a hero tonight, kept by the session. */
+/** How well two heroes know each other, 0..1 (from their lore links). PLACEHOLDER numbers. */
+const BONDS: Record<string, number> = { 'dorms|rosa': 0.9, 'abdi|walt': 0.8, 'gloria|walt': 0.5, 'abdi|gloria': 0.5 };
+export const bond = (a: string, b: string) => BONDS[[a, b].sort().join('|')] ?? 0.3;
+
+/** Ways out of the city: where the freeways leave the map (the city limits, for the game).
+ *  Points are freeway ends at the map edge in our OSM data; which freeway each is was read
+ *  off the map by eye (22 Nov 2026), so the names are best guesses. */
+export const EXITS = [
+  { id: 'i94e', name: 'I-94 east', lat: 44.95, lon: -93.002 },
+  { id: 'i35wn', name: 'I-35W north', lat: 45.059, lon: -93.187 },
+  { id: 'i35ws', name: 'I-35W south', lat: 44.871, lon: -93.299 },
+  { id: 'i35es', name: 'I-35E south', lat: 44.871, lon: -93.145 },
+  { id: 'i394w', name: 'I-394 west', lat: 44.971, lon: -93.358 },
+  { id: 'i94nw', name: 'I-94 north-west', lat: 45.059, lon: -93.308 },
+];
+
+/** Patched together, two heroes try to meet and get out of the city as one. */
+export interface Link {
+  with: string;
+  /** The driver goes to the meeting point; a rider with no vehicle waits there for them. */
+  role: 'driver' | 'rider';
+  meet: { x: number; y: number };
+  exit: string;
+  stage: 'going' | 'waiting' | 'together' | 'alone';
+  /** City tick they reached the meeting point (-1 not yet). */
+  reached: number;
+}
+
+/** Do they go along with the patch? The maths, their trust in you and in each other decide. */
+export function agreeChance(o: { trust: number; bond: number; pressure: number }): number {
+  return Math.max(0.05, Math.min(0.95, 0.45 + o.trust * 0.4 + o.bond * 0.3 + o.pressure * 0.2));
+}
+/** Chance per minute that whoever is waiting gives up and leaves without the other. */
+export function leaveChance(o: { bond: number; danger: number; waited: number }): number {
+  return Math.min(0.9, o.danger * (1 - o.bond) * 0.35 + (o.waited > 12 ? 0.04 * (1 - o.bond * 0.7) : 0));
+}
+
 export interface HeroState {
   id: string;
   left: number; // close calls left
@@ -309,6 +358,21 @@ export interface HeroState {
   riders: number;
   pending: string; // a line waiting for the next time you tune in
   log: { t: number; text: string }[];
+  /** Moving: the path (cells), how far along it (cells) and how fast. null = standing still. */
+  path: { x: number; y: number }[] | null;
+  pathAt: number;
+  kmh: number;
+  /** Where they are now (cells). */
+  x: number;
+  y: number;
+  face: number;
+  link: Link | null;
+  /** Out of the city (past the city limits): safe, for tonight. */
+  out: boolean;
+  /** Riding in someone else's vehicle (not drawn on their own). */
+  riding: boolean;
+  /** One line for the "since your last pass" report. */
+  fate: string;
 }
 export function createHeroStates(): HeroState[] {
   return HEROES.map((h) => ({
@@ -324,7 +388,19 @@ export function createHeroStates(): HeroState[] {
     riders: 0,
     pending: '',
     log: [],
+    path: null,
+    pathAt: 0,
+    kmh: 0,
+    ...startOf(h),
+    link: null,
+    out: false,
+    riding: false,
+    fate: '',
   }));
+}
+function startOf(h: Hero) {
+  const r = routeCells(h);
+  return { x: r[0].x, y: r[0].y, face: Math.atan2(r[1].y - r[0].y, r[1].x - r[0].x) };
 }
 
 /** How you would recognise them from orbit right now. */

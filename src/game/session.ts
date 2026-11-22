@@ -15,7 +15,8 @@ import { buildRoadNet, markCovered, RoadNet } from '../sim/roadnet';
 import { enterStreet, equip, Kind, leaveStreet, newAgent, stepStreet, Street } from '../sim/street';
 import type { Sound } from '../audio';
 import { eventsBetween, WorldEvent } from './world';
-import { createHeroStates, escapeAt, escapeChance, heroById, HeroState, HEROES, setRouter } from './heroes';
+import { agreeChance, bond, cellOf, cellsIn, createHeroStates, escapeChance, EXITS, heroById, HeroState, HEROES, leaveChance, pathPoint, routeCells, setRouter } from './heroes';
+import { nearestRoad, pointAt } from '../sim/roadnet';
 import { createRumours, rumourById, rumourEffect, RumourState } from './rumours';
 import { Building, createBuilding, learnFloors, stepBuilding } from '../sim/building';
 import { rng } from '../sim/outbreak';
@@ -447,8 +448,14 @@ export class Session {
       this.radio.patchFrom = group;
       return this.say('', `Patch: holding ${group.name}. Tune to a second channel and press P again.`, 5);
     }
-    this.syncStreetFirst();
     const from = this.radio.patchFrom;
+    if (from !== group && this.heroState(from.id) && this.heroState(group.id)) {
+      this.radio.patchFrom = null;
+      this.linkSpeaker = group.id;
+      const reply = this.linkHeroes(from.id, group.id);
+      return this.talk(this.radio.groups.find((g) => g.id === this.linkSpeaker) ?? group, reply);
+    }
+    this.syncStreetFirst();
     const convoys = this.radio.convoys.length;
     const reply = patch(this.radio, this.world, from, group, this.tick * 17 + 3);
     if (this.radio.convoys.length > convoys)
@@ -501,6 +508,8 @@ export class Session {
   }
 
   talk(g: Group, text: string) {
+    // The subtitle already names who is speaking.
+    for (const n of [g.who + ': ', g.who.split(' ')[0] + ': ', (heroById(g.id)?.name.split(' ')[0] ?? '-') + ': ']) if (text.startsWith(n)) text = text.slice(n.length);
     this.say(g.who, text, 4 + text.length / 16);
     this.sound.say(text, g.pitch, g.rate);
     this.nextTalk = performance.now() + (4 + text.length / 16) * 1000 + 3000;
@@ -518,7 +527,7 @@ export class Session {
     stepRadio(this.radio, w, this.tick);
     this.radio.groups.forEach((g, k) => {
       const hs = this.heroState(g.id);
-      if (hs && hs.escapeStart >= 0 && !hs.arrived) {
+      if (hs && (hs.out || hs.link || (hs.escapeStart >= 0 && !hs.arrived))) {
         // On the road: they are moving, not standing and fighting.
         g.status = 'calm';
         g.silent = false;
@@ -683,6 +692,9 @@ export class Session {
     if (hs.escapeStart < 0) {
       // Off they go, with as many as the vehicle holds.
       hs.escapeStart = this.tick;
+      hs.path = routeCells(hero);
+      hs.pathAt = 0;
+      hs.kmh = hero.escape.kmh;
       const ride = Math.min(hero.escape.seats, living);
       hs.riders = ride;
       for (let dy = -1; dy <= 1 && ride > 0; dy++)
@@ -699,23 +711,299 @@ export class Session {
     return true;
   }
 
-  /** Heroes on the road move along their route; on arrival their riders join the block they reach. */
+  /** Where a hero is now (cells), `extra` game seconds ahead if they are moving (smooth drawing). */
+  heroWhere(id: string, extra = 0): { x: number; y: number; face: number; moving: boolean } {
+    const hs = this.heroState(id)!;
+    if (hs.path && !hs.dead) {
+      const p = pathPoint(hs.path, hs.pathAt + cellsIn(extra, hs.kmh));
+      return { x: p.x, y: p.y, face: p.face, moving: true };
+    }
+    return { x: hs.x, y: hs.y, face: hs.face, moving: false };
+  }
+
+  /** Where a way out of the city is, on the road (cells). */
+  exitCell(id: string): { x: number; y: number } {
+    const e = EXITS.find((x) => x.id === id)!;
+    const c = cellOf(e.lat, e.lon);
+    const h = nearestRoad(roadNet(), c.x, c.y, 4);
+    if (!h) return c;
+    const p = pointAt(roadNet(), h.edge, h.along);
+    return { x: Math.min(GW - 0.6, Math.max(0.6, p.x)), y: Math.min(GH - 0.6, Math.max(0.6, p.y)) };
+  }
+
+  /** CONNECT two heroes: patched together on the radio, they decide whether to meet up and
+   *  get out of the city together. You do not move them. Returns what they say. */
+  linkHeroes(aId: string, bId: string): string {
+    if (!this.radioUp()) return 'No line of sight. The radio only reaches Minneapolis during a pass.';
+    const A = this.heroState(aId), B = this.heroState(bId);
+    const ga = this.radio.groups.find((x) => x.id === aId), gb = this.radio.groups.find((x) => x.id === bId);
+    const ha = heroById(aId), hb = heroById(bId);
+    if (!A || !B || !ga || !gb || !ha || !hb || aId === bId) return 'Pick a second hero to patch through.';
+    const first = (n: string) => n.split(' ')[0];
+    for (const [st, gr, h] of [[A, ga, ha], [B, gb, hb]] as const) {
+      if (st.dead || gr.silent) return `${first(h.name)} does not answer.`;
+      if (st.out) return `${first(h.name)} is already out of the city.`;
+      if (st.link) return `${first(h.name)} is already on the way to meet ${first(heroById(st.link.with)!.name)}.`;
+    }
+    this.radio.stats.patches++;
+    for (const gr of [ga, gb]) gr.known = true;
+    const bd = bond(aId, bId);
+    const roll = rng(this.tick * 977 + aId.length * 31 + bId.length * 7);
+    // One decision for the pair (they talk it over); the less trusting one is the one who says no.
+    const ca = agreeChance({ trust: ga.trust, bond: bd, pressure: this.pressureAt(A.x, A.y) });
+    const cb = agreeChance({ trust: gb.trust, bond: bd, pressure: this.pressureAt(B.x, B.y) });
+    if ((this.luck ? this.luck() : roll()) > (ca + cb) / 2) {
+      const [st, gr, h, other] = ca <= cb ? [A, ga, ha, hb] : [B, gb, hb, ha];
+      this.radio.stats.refused++;
+      gr.trust = Math.max(0, gr.trust - 0.03);
+      st.log.push({ t: this.t, text: `${localTime(this.t)} You patched them to ${first(other.name)}. They said no.` });
+      st.fate = `turned down meeting ${first(other.name)}`;
+      this.linkSpeaker = st.id;
+      return `${first(h.name)}: I don't know ${first(other.name)}. I'm not crossing town on the word of a voice in the sky.`;
+    }
+    // Who drives: whoever has a vehicle (Mai has none of her own), the bigger one if both do.
+    const hasCar = (id: string) => id !== 'dorms';
+    let drv = aId, rid = bId;
+    if (!hasCar(aId) || (hasCar(bId) && hb.escape.seats > ha.escape.seats)) (drv = bId), (rid = aId);
+    const D = this.heroState(drv)!, R = this.heroState(rid)!;
+    const meet = hasCar(rid) ? this.midway(D, R) : { x: R.x, y: R.y };
+    // The way out: the nearest freeway exit from where they meet.
+    let exit = EXITS[0], best = Infinity;
+    for (const e of EXITS) {
+      const c = cellOf(e.lat, e.lon);
+      const d = Math.hypot(c.x - meet.x, c.y - meet.y);
+      if (d < best) (best = d), (exit = e);
+    }
+    const go = (st: HeroState, role: 'driver' | 'rider', moving: boolean) => {
+      st.link = { with: st === D ? rid : drv, role, meet, exit: exit.id, stage: moving ? 'going' : 'waiting', reached: moving ? -1 : this.tick };
+      st.helpedAt = this.tick;
+      if (moving) {
+        st.path = streetPath({ x: st.x, y: st.y }, meet);
+        st.pathAt = 0;
+        st.kmh = heroById(st.id)!.escape.kmh;
+        if (st.escapeStart < 0) st.escapeStart = this.tick;
+      }
+    };
+    go(D, 'driver', true);
+    go(R, 'rider', hasCar(rid));
+    for (const [st, gr, other] of [[A, ga, hb], [B, gb, ha]] as const) {
+      gr.trust = Math.min(1, gr.trust + 0.05);
+      st.log.push({ t: this.t, text: `${localTime(this.t)} You patched them to ${first(other.name)}. They agreed to meet, then get out by ${exit.name}.` });
+      st.fate = `on the way to meet ${first(other.name)}`;
+    }
+    const dn = first(heroById(drv)!.name), rn = first(heroById(rid)!.name);
+    this.linkSpeaker = drv;
+    return hasCar(rid) ? `${dn}: Copy. I'll meet ${rn} halfway. Then we go out by ${exit.name}, together.` : `${dn}: Copy. Tell ${rn} to stay put, I'm coming to get her. Then ${exit.name}.`;
+  }
+
+  /** Who answered the last patch between heroes (their group speaks the reply). */
+  linkSpeaker = '';
+
+  /** What a hero on the road, or out of the city, says when you tune in. PLACEHOLDER lines. */
+  roadLine(hs: HeroState): string {
+    const me = heroById(hs.id)!.name.split(' ')[0];
+    const L = hs.link;
+    if (hs.out) return `${me}: We're past the city limits. ${hs.fate[0].toUpperCase()}${hs.fate.slice(1)}. Whoever you are up there: thank you.`;
+    if (!L) return '';
+    const other = heroById(L.with)!.name.split(' ')[0];
+    if (L.stage === 'waiting') return `${me}: I'm at the meeting point. No sign of ${other} yet. Tell them to hurry.`;
+    if (L.stage === 'together') return `${me}: ${other} is right here with me. We're heading for the city limits.`;
+    if (L.stage === 'alone') return `${me}: It's just me now. I'm going for the city limits.`;
+    return `${me}: On my way to ${other}. Keep your eyes on the road ahead of me.`;
+  }
+
+  /** Halfway along the streets between two heroes. */
+  private midway(a: HeroState, b: HeroState) {
+    const p = streetPath({ x: a.x, y: a.y }, { x: b.x, y: b.y });
+    let total = 0;
+    for (let i = 1; i < p.length; i++) total += Math.hypot(p[i].x - p[i - 1].x, p[i].y - p[i - 1].y);
+    const m = pathPoint(p, total / 2);
+    return { x: m.x, y: m.y };
+  }
+
+  /** Share of the dead among everyone on the 3 x 3 block round a point (0..1). */
+  pressureAt(x: number, y: number): number {
+    const w = this.world;
+    const i = Math.floor(y) * GW + Math.floor(x);
+    let dead = 0, living = 0;
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) {
+        dead += w.infected[i + dy * GW + dx] || 0;
+        living += w.healthy[i + dy * GW + dx] || 0;
+      }
+    return dead < 3 ? 0 : dead / (dead + living + 1);
+  }
+
+  /** What is left of every linked hero's way: to the meeting point, then out (for the route line). */
+  linkLines(): { x: number; y: number }[][] {
+    const out: { x: number; y: number }[][] = [];
+    for (const hs of this.heroes) {
+      if (!hs.link || hs.dead || hs.out || hs.riding) continue;
+      if (hs.path) {
+        const now = pathPoint(hs.path, hs.pathAt);
+        let k = 1, acc = 0;
+        while (k < hs.path.length) {
+          const seg = Math.hypot(hs.path[k].x - hs.path[k - 1].x, hs.path[k].y - hs.path[k - 1].y);
+          if (acc + seg > hs.pathAt) break;
+          acc += seg;
+          k++;
+        }
+        out.push([{ x: now.x, y: now.y }, ...hs.path.slice(k)]);
+      }
+      if (hs.link.stage === 'going' || hs.link.stage === 'waiting') {
+        // The planned way out from the meeting point (drawn once, by the driver).
+        if (hs.link.role === 'driver') out.push([hs.link.meet, this.exitCell(hs.link.exit)]);
+      }
+    }
+    return out;
+  }
+
+  /** Something on the road: the dead. A close call if their luck and your help hold, else lost. */
+  private trouble(hs: HeroState, g: Group, waiting: boolean): boolean {
+    const p = this.pressureAt(hs.x, hs.y);
+    if (p <= 0) return false;
+    const roll = this.luck ? this.luck() : rng(this.tick * 3301 + hs.id.length * 97 + 5)();
+    if (roll > p * (waiting ? 0.25 : 0.1)) return false;
+    const hero = heroById(hs.id)!;
+    const save = escapeChance({ left: hs.left, helpedAgo: hs.helpedAt < 0 ? Infinity : this.tick - hs.helpedAt, vehicle: !waiting || hs.id !== 'dorms', trust: g.trust, pressure: p });
+    const roll2 = this.luck ? this.luck() : rng(this.tick * 7919 + hs.id.length * 13 + 1)();
+    if (roll2 < save) {
+      const n = hs.closeCallsUsed;
+      hs.left--;
+      hs.closeCallsUsed++;
+      hs.pending = hero.after[Math.min(n, hero.after.length - 1)];
+      hs.log.push({ t: this.t, text: `${localTime(this.t)} Close call on the way. ${hero.costs[Math.min(n, hero.costs.length - 1)]}` });
+      return false;
+    }
+    hs.dead = true;
+    hs.path = null;
+    g.silent = true;
+    g.fate = `lost on the way, around ${localTime(this.t)}`;
+    hs.fate = `did not make it: the dead caught them on the way, around ${localTime(this.t)}`;
+    hs.log.push({ t: this.t, text: `${localTime(this.t)} The dead caught them on the way. No contact since.` });
+    this.lossLog.push(`${localTime(this.t)} ${hero.name} lost on the way`);
+    // Whoever was riding with them runs for it on foot.
+    for (const o of this.heroes)
+      if (o.riding && o.link && o.link.with === hs.id) {
+        o.riding = false;
+        o.path = null;
+        o.link = null;
+        o.fate = `got out of the wreck and ran, around ${localTime(this.t)}`;
+        o.log.push({ t: this.t, text: `${localTime(this.t)} The vehicle went down. They got out and ran.` });
+      }
+    return true;
+  }
+
+  private leaveAlone(hs: HeroState, why: string) {
+    if (!hs.link) return;
+    hs.link.stage = 'alone';
+    hs.path = streetPath({ x: hs.x, y: hs.y }, this.exitCell(hs.link.exit));
+    hs.pathAt = 0;
+    hs.kmh = heroById(hs.id)!.escape.kmh;
+    if (hs.escapeStart < 0) hs.escapeStart = this.tick;
+    hs.log.push({ t: this.t, text: `${localTime(this.t)} ${why}` });
+    hs.fate = why;
+  }
+
+  /** A hero got to the end of their path. */
+  private reached(hs: HeroState, g: Group) {
+    const hero = heroById(hs.id)!;
+    const L = hs.link;
+    const first = (id: string) => heroById(id)!.name.split(' ')[0];
+    if (!L) {
+      // Their own escape route (after a close call).
+      hs.arrived = true;
+      const j = Math.floor(hs.y) * GW + Math.floor(hs.x);
+      this.world.healthy[j] += hs.riders + 1;
+      this.world.armed[j] += 1;
+      this.world.guard[j] = 1;
+      hs.log.push({ t: this.t, text: `${localTime(this.t)} Arrived: ${hero.escape.to}, with ${Math.round(hs.riders)} people.` });
+      hs.fate = `made it to ${hero.escape.to}`;
+      return;
+    }
+    const P = this.heroState(L.with)!;
+    if (L.stage === 'going') {
+      L.reached = this.tick;
+      if (P.link && P.link.with === hs.id && P.link.stage === 'waiting' && !P.dead) {
+        // Both here: one convoy out.
+        const path = streetPath({ x: hs.x, y: hs.y }, this.exitCell(L.exit));
+        const kmh = Math.min(hero.escape.kmh, heroById(P.id)!.escape.kmh);
+        for (const [st, lag] of [[hs, 0], [P, 0.13]] as const) {
+          st.link!.stage = 'together';
+          st.path = path;
+          st.pathAt = -lag; // the second vehicle a few car lengths behind
+          st.kmh = kmh;
+          if (st.escapeStart < 0) st.escapeStart = this.tick;
+        }
+        const rider = hs.link!.role === 'rider' ? hs : P;
+        if (rider.id === 'dorms') (rider.riding = true), (rider.pathAt = 0);
+        const at = localTime(this.t);
+        hs.log.push({ t: this.t, text: `${at} Met ${first(P.id)}. Heading out together by ${EXITS.find((e) => e.id === L.exit)!.name}.` });
+        P.log.push({ t: this.t, text: `${at} ${first(hs.id)} came. Heading out together.` });
+        hs.fate = P.fate = `met up and drove for the city limits together`;
+        return;
+      }
+      if (P.dead || P.out || !P.link || P.link.with !== hs.id || P.link.stage === 'alone') {
+        this.leaveAlone(hs, `Got to the meeting point. ${first(P.id)} was not there${P.dead ? ' (no contact)' : ', and had gone'}. Went on alone.`);
+        return;
+      }
+      L.stage = 'waiting';
+      hs.log.push({ t: this.t, text: `${localTime(this.t)} At the meeting point, waiting for ${first(P.id)}.` });
+      return;
+    }
+    // Together or alone, at the city limits.
+    hs.out = true;
+    hs.path = null;
+    g.status = 'calm';
+    const together = L.stage === 'together' && P.link?.stage === 'together' && !P.dead;
+    const exitName = EXITS.find((e) => e.id === L.exit)!.name;
+    if (!hs.riding) {
+      hs.log.push({ t: this.t, text: `${localTime(this.t)} Out of the city by ${exitName}${together ? `, with ${first(P.id)}` : ', alone'}.` });
+      hs.fate = together ? `escaped the city with ${first(P.id)}, by ${exitName}` : `escaped the city alone, by ${exitName}`;
+    } else {
+      hs.log.push({ t: this.t, text: `${localTime(this.t)} Out of the city, riding with ${first(P.id)}.` });
+      hs.fate = `escaped the city riding with ${first(P.id)}`;
+    }
+    this.world.stats.escaped += hero.escape.seats;
+  }
+
+  /** Heroes on the move go along their path; linked heroes wait, meet, and drive for the city limits. */
   private moveHeroes() {
     for (const hs of this.heroes) {
-      if (hs.escapeStart < 0 || hs.arrived || hs.dead) continue;
+      if (hs.dead || hs.out) continue;
       const g = this.radio.groups.find((x) => x.id === hs.id);
-      const hero = heroById(hs.id);
-      if (!g || !hero) continue;
-      const at = escapeAt(hero, (this.tick - hs.escapeStart) * TICK);
-      g.x = at.x;
-      g.y = at.y;
-      if (at.arrived) {
-        hs.arrived = true;
-        const j = Math.floor(at.y) * GW + Math.floor(at.x);
-        this.world.healthy[j] += hs.riders + 1;
-        this.world.armed[j] += 1;
-        this.world.guard[j] = 1;
-        hs.log.push({ t: this.t, text: `${localTime(this.t)} Arrived: ${hero.escape.to}, with ${Math.round(hs.riders)} people.` });
+      if (!g) continue;
+      if (hs.path) {
+        hs.pathAt += cellsIn(TICK, hs.kmh);
+        const p = pathPoint(hs.path, hs.pathAt);
+        hs.x = g.x = p.x;
+        hs.y = g.y = p.y;
+        hs.face = p.face;
+        if (hs.link && !hs.riding && this.trouble(hs, g, false)) continue;
+        if (p.arrived) {
+          hs.path = null;
+          this.reached(hs, g);
+        }
+        continue;
+      }
+      const L = hs.link;
+      if (L && L.stage === 'waiting') {
+        const P = this.heroState(L.with)!;
+        if (this.trouble(hs, g, true)) continue;
+        if (P.dead) {
+          if (hs.id === 'dorms') {
+            hs.link = null;
+            hs.fate = `waited for ${heroById(P.id)!.name.split(' ')[0]}, who never came`;
+            hs.log.push({ t: this.t, text: `${localTime(this.t)} ${heroById(P.id)!.name.split(' ')[0]} never came.` });
+          } else this.leaveAlone(hs, `${heroById(P.id)!.name.split(' ')[0]} never came. Went on alone.`);
+          continue;
+        }
+        if (hs.id === 'dorms') continue; // on foot: she can only wait
+        const waited = this.tick - L.reached;
+        const roll = this.luck ? this.luck() : rng(this.tick * 4409 + hs.id.length * 3)();
+        if (roll < leaveChance({ bond: bond(hs.id, P.id), danger: this.pressureAt(hs.x, hs.y), waited })) {
+          this.leaveAlone(hs, `Waited ${waited} minutes for ${heroById(P.id)!.name.split(' ')[0]}, then left without them.`);
+        }
       }
     }
   }
@@ -806,7 +1094,7 @@ export class Session {
         hs.pending = '';
       } else {
         const before = group.known;
-        this.talk(group, nextLine(this.radio, this.world, group, pass));
+        this.talk(group, (hs && this.roadLine(hs)) || nextLine(this.radio, this.world, group, pass));
         if (hs && !before) hs.log.push({ t: this.t, text: `${localTime(this.t)} Pass ${pass + 1}: first heard on ${group.freq.toFixed(2)} MHz.` });
       }
     }

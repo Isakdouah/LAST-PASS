@@ -105,6 +105,46 @@ describe('road network for cars', () => {
     expect(closest).toBeGreaterThan(3.5);
     expect(turned).toBe(true);
   });
+  it('cars are solid: a jam is bumper to bumper, never two cars in one spot', () => {
+    const net = buildRoadNet(roads([[[0, 5], [60, 5]]]));
+    const s: Street = newStreet(0, 0, 60, 10);
+    const w = createWorld(60, 10);
+    for (let x = 31; x < 44; x += 0.2) s.agents.push(driver(x, 5));
+    s.wrecks.push({ x: 46, y: 5 + 2 / 79, face: 0, burn: 0, crashed: true, uid: 1 });
+    let worst = Infinity, queued = 0;
+    for (let t = 0; t < 400; t++) {
+      stepStreet(s, w, t + 1, 0.25, undefined, undefined, undefined, net);
+      const cars = s.agents.filter((a) => a.car === 1 && !a.gone);
+      if (t < 5) continue;
+      for (let i = 0; i < cars.length; i++)
+        for (let j = i + 1; j < cars.length; j++) {
+          const a = cars[i], b = cars[j];
+          if (Math.abs(a.y - b.y) * 79 > 1.5) continue; // other lane
+          worst = Math.min(worst, Math.abs(a.x - b.x) * 79);
+        }
+      queued = Math.max(queued, cars.filter((a) => a.spd < 0.5).length);
+    }
+    expect(worst).toBeGreaterThan(4); // car bodies are 4.4 m long: they touch at most
+    expect(worst).toBeLessThan(6.5); // ...and they do close up: a queue, not a gap
+    expect(queued).toBeGreaterThan(1);
+  });
+  it('cars crossing at a junction never drive through each other', () => {
+    const net = buildRoadNet(roads([[[0, 10], [40, 10]], [[20, 0], [20, 40]]]));
+    const s: Street = newStreet(0, 0, 40, 40);
+    const w = createWorld(40, 40);
+    // Zone centre is the junction, so everyone drives away from it... start them past it,
+    // pointed back in, and let them turn wherever they like.
+    for (let k = 0; k < 10; k++) s.agents.push(driver(21 + k * 0.15, 10), driver(20, 21 + k * 0.15), driver(19 - k * 0.15, 10), driver(20, 19 - k * 0.15));
+    stepStreet(s, w, 1, 0.25, undefined, undefined, undefined, net);
+    for (const a of s.agents) (a.dir = -a.dir), (a.face += Math.PI), (a.nxt = -1);
+    let worst = Infinity;
+    for (let t = 0; t < 200; t++) {
+      stepStreet(s, w, t + 2, 0.25, undefined, undefined, undefined, net);
+      const cars = s.agents.filter((a) => a.car === 1 && !a.gone);
+      for (let i = 0; i < cars.length; i++) for (let j = i + 1; j < cars.length; j++) worst = Math.min(worst, Math.hypot(cars[i].x - cars[j].x, cars[i].y - cars[j].y) * 79);
+    }
+    expect(worst).toBeGreaterThan(1.8); // two bodies side by side at the very least, never one spot
+  });
   it('on the real map, cars stay on the streets and out of buildings', () => {
     const net = roadNet();
     // Downtown Minneapolis and the blocks around it, 40 x 40 cells.

@@ -562,6 +562,36 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     for (const w of s.wrecks) if (Math.abs(w.x - a.x) < m(16) && Math.abs(w.y - a.y) < m(16)) look(w.x, w.y, true);
     return [g, wr];
   };
+  /** Cars are solid. The first car or wreck that a car body at (x, y) facing `face` would
+   *  overlap (boxes about 4.4 x 1.8 m), or null. `onlyAhead`: ignore cars behind (they yield). */
+  const CAR_HL = 2.2, CAR_HW = 0.9;
+  const bodyHit = (a: Agent, x: number, y: number, face: number, onlyAhead: boolean): Agent | Wreck | null => {
+    const fx = Math.cos(face), fy = Math.sin(face);
+    const test = (ox: number, oy: number, oface: number) => {
+      const rx = (ox - x) * M, ry = (oy - y) * M;
+      if (rx * rx + ry * ry > 36) return false;
+      const along = rx * fx + ry * fy, lat = -rx * fy + ry * fx;
+      const c = Math.abs(Math.cos(oface - face)), sn = Math.abs(Math.sin(oface - face));
+      if (Math.abs(along) > CAR_HL + CAR_HL * c + CAR_HW * sn - 0.3) return false;
+      if (Math.abs(lat) > CAR_HW + CAR_HL * sn + CAR_HW * c - 0.15) return false;
+      return true;
+    };
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) {
+        const b = buckets.get(key(x + dx / B, y + dy / B));
+        if (!b) continue;
+        for (const o of b) {
+          if (o === a || !isCar(o) || o.gone) continue;
+          if (onlyAhead) {
+            const along = ((o.x - x) * fx + (o.y - y) * fy) * M;
+            if (along < -0.3 || (along < 0.3 && o.uid < a.uid)) continue;
+          }
+          if (test(o.x, o.y, o.face)) return o;
+        }
+      }
+    for (const w of s.wrecks) if (Math.abs(w.x - x) < m(6) && Math.abs(w.y - y) < m(6) && test(w.x, w.y, w.face)) return w;
+    return null;
+  };
   /** The car stops for good: crashed, or left in a jam. The driver gets out (if they can). */
   const leaveCar = (a: Agent, crashed: boolean) => {
     if (a.car === 1) {
@@ -606,10 +636,26 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       a.dir = pa.tx * wx + pa.ty * wy >= 0 ? 1 : -1;
       a.face = Math.atan2(pa.ty * a.dir, pa.tx * a.dir);
       a.nxt = -1;
-      // The car pulls out right in its lane (no sliding across the road to get there).
+      // The car pulls out right in its lane (no sliding across the road to get there), into
+      // a gap: if the kerb is full of cars, they wait.
       const lane0 = m(Math.min(3, N.ewid[h.edge] / 4));
-      a.x = pa.x - pa.ty * a.dir * lane0;
-      a.y = pa.y + pa.tx * a.dir * lane0;
+      let placed = false;
+      for (const off of [0, 6, -6, 12, -12]) {
+        const al = Math.max(0, Math.min(N.elen[h.edge], h.along + off));
+        pointAt(N, h.edge, al, pa);
+        const x = pa.x - pa.ty * a.dir * lane0, y = pa.y + pa.tx * a.dir * lane0;
+        if (bodyHit(a, x, y, a.face, false)) continue;
+        a.x = x;
+        a.y = y;
+        a.along = al;
+        placed = true;
+        break;
+      }
+      if (!placed) {
+        a.car = 2;
+        a.road = -1;
+        return;
+      }
     }
     if (a.nxt < 0) plan(a);
     const wid = N.ewid[a.road];
@@ -636,6 +682,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       leaveCar(a, false);
       return;
     }
+    const was = { road: a.road, dir: a.dir, along: a.along, nxt: a.nxt, nxtDir: a.nxtDir, nxtTurn: a.nxtTurn, x: a.x, y: a.y, face: a.face };
     let d = a.spd * dt;
     for (let guard = 0; d > 0 && guard < 8; guard++) {
       const rem = a.dir > 0 ? N.elen[a.road] - a.along : a.along;
@@ -673,6 +720,19 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       turn = Math.atan2(Math.sin(turn), Math.cos(turn));
       const maxTurn = 3 * dt;
       a.face += Math.max(-maxTurn, Math.min(maxTurn, turn));
+    }
+    // Solid: never drive into the car (or wreck) in front. Too fast to stop: a pile-up.
+    const o = bodyHit(a, a.x, a.y, a.face, true);
+    if (o) {
+      const fast = a.spd > 6;
+      Object.assign(a, was);
+      a.vx = a.vy = 0;
+      if (fast && r() < 0.5) {
+        leaveCar(a, true);
+        if ('kind' in o && r() < 0.5) leaveCar(o, true);
+        return;
+      }
+      a.spd = 0;
     }
     // Out of the area: they got away (from here, at least).
     if (a.x < s.x0 + 0.15 || a.y < s.y0 + 0.15 || a.x > s.x0 + s.w - 0.15 || a.y > s.y0 + s.h - 0.15) {
