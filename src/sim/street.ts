@@ -8,6 +8,7 @@
 // People run to their cars and drive, until the road jams.
 // Positions are in map cells (1 cell is about 79 m); speeds and ranges are set in metres
 // and seconds of game time, so the street looks right at any zoom.
+import { endNode, nearestRoad, pointAt, RoadNet, RoadPoint } from './roadnet';
 import { CAR_SHARE, EVENING, Env, headShare, hitChance, outsideShare, rng, SKILL, World } from './outbreak';
 
 export const enum Kind {
@@ -77,6 +78,17 @@ export interface Agent {
   car: number;
   /** Seconds the car has been stuck. */
   stuck: number;
+  /** Driving on the road network: edge, metres from its start, direction (+1 / -1),
+   *  speed (m/s), and the turn already chosen at the next junction (-1 = none yet). */
+  road: number;
+  along: number;
+  dir: number;
+  spd: number;
+  nxt: number;
+  nxtDir: number;
+  nxtTurn: number;
+  /** Stable number for this person (colours, names), never reused. */
+  uid: number;
   /** Bitten: seconds until they turn (-1 = not bitten). They may hide it. */
   turn: number;
   /** The dead: seconds still knocked down. */
@@ -134,6 +146,9 @@ export interface StreetStats {
   crawlers: number;
   /** Cars that got out of the area. */
   drove: number;
+  /** Cars that crashed, and cars left behind in a jam. */
+  crashes: number;
+  abandoned: number;
   /** People who came out of buildings, and people caught inside. */
   cameOut: number;
   caughtInside: number;
@@ -144,6 +159,17 @@ export interface Exit {
   y: number;
   armed: boolean;
   ammo: number;
+}
+
+export interface Wreck {
+  x: number;
+  y: number;
+  face: number;
+  /** Seconds it still burns (0 = not on fire, just dead or left). */
+  burn: number;
+  /** Crashed (true) or just left in a jam (false). */
+  crashed: boolean;
+  uid: number;
 }
 
 export interface Street {
@@ -173,6 +199,8 @@ export interface Street {
   pendDead: Float32Array;
   /** Cars that drove out of the area since the session last looked. */
   exits: Exit[];
+  /** Crashed and abandoned cars: they stay where they stopped and block the lane. */
+  wrecks: Wreck[];
   stats: StreetStats;
 }
 
@@ -198,10 +226,11 @@ const RALLY = m(300); // how far a scared person will run to reach someone armed
 const SWING = 0.9; // seconds between swings
 
 export function emptyStats(): StreetStats {
-  return { shots: 0, hits: 0, heads: 0, stray: 0, fights: 0, melee: 0, bites: 0, getUps: 0, crawlers: 0, drove: 0, cameOut: 0, caughtInside: 0 };
+  return { shots: 0, hits: 0, heads: 0, stray: 0, fights: 0, melee: 0, bites: 0, getUps: 0, crawlers: 0, drove: 0, crashes: 0, abandoned: 0, cameOut: 0, caughtInside: 0 };
 }
 
 /** A new person or one of the dead. Old call shape kept: (x, y, kind, ammo, role). */
+let nextUid = 1;
 export function newAgent(x: number, y: number, kind: Kind, ammo = 0, role = Role.Civilian): Agent {
   const skill = role === Role.Police ? SKILL.police : role === Role.Hunter ? SKILL.hunter : role === Role.Soldier ? SKILL.soldier : SKILL.regular;
   return {
@@ -222,6 +251,14 @@ export function newAgent(x: number, y: number, kind: Kind, ammo = 0, role = Role
     hasCar: false,
     car: 0,
     stuck: 0,
+    road: -1,
+    along: 0,
+    dir: 1,
+    spd: 0,
+    nxt: -1,
+    nxtDir: 1,
+    nxtTurn: 0,
+    uid: nextUid++,
     turn: -1,
     down: 0,
     crawl: false,
@@ -273,6 +310,7 @@ export function newStreet(x0: number, y0: number, w: number, h: number, scale = 
     pendOut: new Float32Array(n),
     pendDead: new Float32Array(n),
     exits: [],
+    wrecks: [],
     stats: emptyStats(),
   };
 }
@@ -365,7 +403,7 @@ function isLand(world: World, x: number, y: number): boolean {
 
 /** One street-level step of `dt` game seconds. Mutates and returns the street.
  *  `onRoad` says where a car can drive (defaults to anywhere not blocked). */
-export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blocked: Blocked = open, env: Env = EVENING, onRoad: Blocked = anyRoad): Street {
+export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blocked: Blocked = open, env: Env = EVENING, onRoad: Blocked = anyRoad, net?: RoadNet): Street {
   const r = rng(seed);
   s.shots = 0;
   const st = s.stats;
@@ -448,6 +486,224 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     s.noise.push({ x: a.x, y: a.y, t: 8 });
   };
 
+  // ---- Cars on the real road network (when the session passes one in) ----
+  // A car follows a road line in its own lane (right-hand side), slows for turns and for
+  // whatever is ahead, and turns smoothly. It never leaves the road, so it never clips
+  // into a building. Panicked drivers crash; a wreck stays put and blocks the lane.
+  const pa: RoadPoint = { x: 0, y: 0, tx: 1, ty: 0 };
+  const pb: RoadPoint = { x: 0, y: 0, tx: 1, ty: 0 };
+  const pc: RoadPoint = { x: 0, y: 0, tx: 1, ty: 0 };
+  const zoneCx = s.x0 + s.w / 2, zoneCy = s.y0 + s.h / 2;
+  const wantDir = (a: Agent): [number, number] => {
+    let wx = a.x - zoneCx, wy = a.y - zoneCy;
+    const wl = Math.hypot(wx, wy) || 1;
+    wx /= wl;
+    wy /= wl;
+    const z = a.tgt;
+    if (z && z.kind === Kind.Dead) {
+      const zl = Math.sqrt(d2(a, z)) || 1;
+      wx += ((a.x - z.x) / zl) * 1.5;
+      wy += ((a.y - z.y) / zl) * 1.5;
+    }
+    return [wx, wy];
+  };
+  /** Unit direction (cells) over the first or last 12 m of edge e, driven in direction dir. */
+  const edgeDir = (e: number, dir: number, atEnd: boolean): [number, number] => {
+    const N = net!, L = N.elen[e];
+    const from = dir > 0 ? (atEnd ? Math.max(0, L - 12) : 0) : atEnd ? Math.min(L, 12) : L;
+    pointAt(N, e, from, pa);
+    pointAt(N, e, from + dir * 12, pb);
+    const dx = pb.x - pa.x, dy = pb.y - pa.y, l = Math.hypot(dx, dy) || 1;
+    return [dx / l, dy / l];
+  };
+  /** Choose the turn at the next junction: away from the dead and out of the area. */
+  const plan = (a: Agent) => {
+    const N = net!;
+    const node = endNode(N, a.road, a.dir);
+    const [ix, iy] = edgeDir(a.road, a.dir, true);
+    const [wx, wy] = wantDir(a);
+    let best = -1, bd = 1, bs = -Infinity;
+    for (const e of N.adj[node])
+      for (const d of [1, -1]) {
+        if ((d > 0 ? N.ea[e] : N.eb[e]) !== node) continue;
+        if (e === a.road && d === -a.dir) continue; // straight back the way it came
+        const [ox, oy] = edgeDir(e, d, false);
+        const score = ox * wx + oy * wy + (ox * ix + oy * iy) * 0.6 + N.ewid[e] / 30 + r() * 0.8 - N.covered[e] * 6;
+        if (score > bs) (bs = score), (best = e), (bd = d);
+      }
+    if (best < 0) {
+      // A dead end: turn round.
+      a.nxt = a.road;
+      a.nxtDir = -a.dir;
+      a.nxtTurn = Math.PI;
+      return;
+    }
+    const [ox, oy] = edgeDir(best, bd, false);
+    a.nxt = best;
+    a.nxtDir = bd;
+    a.nxtTurn = Math.acos(Math.max(-1, Math.min(1, ox * ix + oy * iy)));
+  };
+  /** Metres to the nearest car or wreck ahead in this lane, and whether it is a wreck. */
+  const gapAhead = (a: Agent, fx: number, fy: number): [number, boolean] => {
+    let g = Infinity, wr = false;
+    const look = (ox: number, oy: number, isW: boolean) => {
+      const rx = (ox - a.x) * M, ry = (oy - a.y) * M;
+      const ahead = rx * fx + ry * fy;
+      if (ahead < 0.5 || ahead > 16) return;
+      if (Math.abs(-rx * fy + ry * fx) > 2.2) return;
+      if (ahead < g) (g = ahead), (wr = isW);
+    };
+    const R = Math.ceil(m(16) * B);
+    for (let dy = -R; dy <= R; dy++)
+      for (let dx = -R; dx <= R; dx++) {
+        const b = buckets.get(key(a.x + dx / B, a.y + dy / B));
+        if (b) for (const o of b) if (o !== a && isCar(o)) look(o.x, o.y, false);
+      }
+    for (const w of s.wrecks) if (Math.abs(w.x - a.x) < m(16) && Math.abs(w.y - a.y) < m(16)) look(w.x, w.y, true);
+    return [g, wr];
+  };
+  /** The car stops for good: crashed, or left in a jam. The driver gets out (if they can). */
+  const leaveCar = (a: Agent, crashed: boolean) => {
+    if (a.car === 1) {
+      s.wrecks.push({ x: a.x, y: a.y, face: a.face, burn: crashed && r() < 0.3 ? 40 + r() * 80 : 0, crashed, uid: a.uid });
+      if (s.wrecks.length > 400) s.wrecks.shift();
+      if (crashed) {
+        st.crashes++;
+        s.noise.push({ x: a.x, y: a.y, t: 10 });
+      } else st.abandoned++;
+    }
+    a.car = 0;
+    a.hasCar = false;
+    a.road = -1;
+    a.spd = 0;
+    a.stuck = 0;
+    a.vx = 0;
+    a.vy = 0;
+    if (crashed && r() < 0.2) {
+      a.kind = Kind.Fallen; // did not walk away from it
+      return;
+    }
+    // Out of the driver's door, a step to the side (if that is not a wall).
+    const fx = Math.cos(a.face), fy = Math.sin(a.face);
+    const ox = a.x - fy * m(2.2), oy = a.y + fx * m(2.2);
+    if (!blocked(ox, oy)) (a.x = ox), (a.y = oy);
+  };
+  const drive = (a: Agent) => {
+    const N = net!;
+    if (a.think-- <= 0) (a.think = 4), (a.tgt = nearest(a, isDead, SEE));
+    a.fear = 1;
+    if (a.road < 0) {
+      const h = nearestRoad(N, a.x, a.y, m(40));
+      if (!h) {
+        a.car = 0;
+        return;
+      }
+      a.road = h.edge;
+      a.along = h.along;
+      a.spd = 0;
+      pointAt(N, h.edge, h.along, pa);
+      const [wx, wy] = wantDir(a);
+      a.dir = pa.tx * wx + pa.ty * wy >= 0 ? 1 : -1;
+      a.face = Math.atan2(pa.ty * a.dir, pa.tx * a.dir);
+      a.nxt = -1;
+      // The car pulls out right in its lane (no sliding across the road to get there).
+      const lane0 = m(Math.min(3, N.ewid[h.edge] / 4));
+      a.x = pa.x - pa.ty * a.dir * lane0;
+      a.y = pa.y + pa.tx * a.dir * lane0;
+    }
+    if (a.nxt < 0) plan(a);
+    const wid = N.ewid[a.road];
+    const remain = a.dir > 0 ? N.elen[a.road] - a.along : a.along;
+    let vMax = wid >= 18 ? SPEED.car * 1.5 : wid >= 13 ? SPEED.car * 1.2 : SPEED.car;
+    // Slow down for the turn ahead: a corner at walking pace, a U-turn slower still.
+    const vTurn = SPEED.car * (1 - (0.7 * a.nxtTurn) / Math.PI);
+    if (remain < 16) vMax = Math.min(vMax, vTurn + (vMax - vTurn) * Math.max(0, (remain - 4) / 12));
+    const fx = Math.cos(a.face), fy = Math.sin(a.face);
+    const [gap, isWreck] = gapAhead(a, fx, fy);
+    if (gap < 16) vMax = Math.min(vMax, Math.max(0, (gap - 5) * 1.2));
+    a.spd = Math.max(0, a.spd + Math.max(-9 * dt, Math.min(3.5 * dt, vMax - a.spd)));
+    a.stuck = a.spd < 0.5 ? a.stuck + dt : Math.max(0, a.stuck - 2 * dt);
+    // A wreck across the lane: turn round. Stuck in a jam too long: get out and run.
+    if (isWreck && gap < 9 && a.stuck > 2.5) {
+      a.dir = -a.dir;
+      a.nxt = -1;
+      a.stuck = 0;
+      plan(a);
+    }
+    // People sit in a jam a long while; with the dead close they give up much sooner.
+    const z = a.tgt && a.tgt.kind === Kind.Dead && d2(a, a.tgt) < m(40) ** 2;
+    if (a.stuck > (z ? 8 : 45)) {
+      leaveCar(a, false);
+      return;
+    }
+    let d = a.spd * dt;
+    for (let guard = 0; d > 0 && guard < 8; guard++) {
+      const rem = a.dir > 0 ? N.elen[a.road] - a.along : a.along;
+      if (d <= rem) {
+        a.along += a.dir * d;
+        break;
+      }
+      d -= rem;
+      a.road = a.nxt;
+      a.dir = a.nxtDir;
+      a.along = a.dir > 0 ? 0 : N.elen[a.road];
+      a.nxt = -1;
+      plan(a);
+    }
+    // Where the car should be: on the road line, shifted into the right-hand lane, using
+    // the road's direction over a few metres so the lane bends round corners.
+    pointAt(N, a.road, a.along, pc);
+    pointAt(N, a.road, a.along - 4 * a.dir, pa);
+    pointAt(N, a.road, a.along + 4 * a.dir, pb);
+    let tx = pb.x - pa.x, ty = pb.y - pa.y;
+    const tl = Math.hypot(tx, ty);
+    if (tl < 1e-6) (tx = pc.tx * a.dir), (ty = pc.ty * a.dir);
+    else (tx /= tl), (ty /= tl);
+    const lane = m(Math.min(3, wid / 4));
+    const gx = pc.x - ty * lane, gy = pc.y + tx * lane;
+    // Ease toward it (no snapping), and turn the body at a car's pace.
+    const k = 1 - Math.exp(-dt / 0.18);
+    const mx = (gx - a.x) * k, my = (gy - a.y) * k;
+    a.x += mx;
+    a.y += my;
+    a.vx = mx;
+    a.vy = my;
+    if (Math.hypot(mx, my) * M > 0.02) {
+      let turn = Math.atan2(my, mx) - a.face;
+      turn = Math.atan2(Math.sin(turn), Math.cos(turn));
+      const maxTurn = 3 * dt;
+      a.face += Math.max(-maxTurn, Math.min(maxTurn, turn));
+    }
+    // Out of the area: they got away (from here, at least).
+    if (a.x < s.x0 + 0.15 || a.y < s.y0 + 0.15 || a.x > s.x0 + s.w - 0.15 || a.y > s.y0 + s.h - 0.15) {
+      a.gone = true;
+      st.drove++;
+      s.exits.push({ x: a.x, y: a.y, armed: a.ammo > 0, ammo: a.ammo });
+      return;
+    }
+    if (a.spd > 3) {
+      // The dead in the road: knocked flying, and sometimes the car comes off worse.
+      const hitZ = nearest(a, isUp, m(2));
+      if (hitZ) {
+        hitZ.down = 2;
+        if (r() < 0.3) hitZ.kind = Kind.Fallen;
+        s.blood.push({ x: hitZ.x, y: hitZ.y });
+        a.spd *= 0.6;
+        if (r() < 0.04) return leaveCar(a, true);
+      }
+      // Another car coming across: a crash at the junction.
+      const o = nearest(a, isCar, m(2.6), a);
+      if (o && o.spd > 3) {
+        const rel = Math.abs(Math.atan2(Math.sin(o.face - a.face), Math.cos(o.face - a.face)));
+        if (rel > 0.6 && rel < 2.6 && r() < 0.25) {
+          leaveCar(a, true);
+          leaveCar(o, true);
+        }
+      }
+    }
+  };
+  for (const w of s.wrecks) if (w.burn > 0) w.burn = Math.max(0, w.burn - dt);
+
   for (const a of s.agents) {
     if (a.kind === Kind.Fallen || a.gone) continue;
     if (a.flash > 0) a.flash--;
@@ -460,6 +716,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       if (a.turn >= 0) {
         a.turn -= dt;
         if (a.turn <= 0) {
+          if (a.car === 1) leaveCar(a, false);
           a.kind = Kind.Dead;
           a.ammo = 0;
           a.car = 0;
@@ -467,6 +724,10 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
           a.tgt = null;
           continue;
         }
+      }
+      if (a.car === 1 && net) {
+        drive(a);
+        continue;
       }
       if (a.car === 1) {
         // Driving: away from the dead, toward the edge of the area, on roads only.
@@ -561,10 +822,29 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         // Stand and shoot.
         a.face = Math.atan2(z.y - a.y, z.x - a.x);
         if (a.cooldown <= 0) fire(a, z, false);
+      } else if (a.car === 2 && z && net) {
+        // Getting to the car, parked at the kerb: run to the street, then drive off.
+        const h = nearestRoad(net, a.x, a.y, m(30));
+        if (!h) {
+          a.car = 0;
+        } else if (h.dist < m(4) && r() < 1.5 * dt) {
+          a.car = 1;
+          a.road = -1;
+          drive(a);
+          continue;
+        } else {
+          pointAt(net, h.edge, h.along, pa);
+          const rl = h.dist || 1;
+          const zl = Math.sqrt(d2(a, z)) || 1;
+          tx = (pa.x - a.x) / rl + ((a.x - z.x) / zl) * 0.4;
+          ty = (pa.y - a.y) / rl + ((a.y - z.y) / zl) * 0.4;
+          speed = SPEED.run;
+        }
       } else if (a.car === 2 && z) {
         // Getting to the car: on a road now? Then drive.
         if (onRoad(a.x, a.y) && r() < 0.5 * dt) {
           a.car = 1;
+          a.road = -1;
           a.vx = a.x - z.x;
           a.vy = a.y - z.y;
           continue;
@@ -608,7 +888,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
             }
             speed = 0;
           }
-        } else if (a.hasCar && a.car === 0 && a.fear > 0.8 && r() < 0.15) {
+        } else if (a.hasCar && a.car === 0 && a.fear > 0.8 && r() < 0.6 * dt) {
           a.car = 2;
         } else {
           // Run: toward someone armed if one is close and not past the dead, else away.
@@ -651,7 +931,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
             // A car: they claw at it; a stopped car is a trap.
             if (p.stuck > 1 && r() < 0.15 * dt) {
               bitten(p);
-              p.car = 0;
+              leaveCar(p, false);
             }
           } else if (p.turn < 0) {
             // Last chance: a swing with whatever they hold.

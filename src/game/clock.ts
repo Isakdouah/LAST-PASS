@@ -65,17 +65,31 @@ export function localTime(t: number): string {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
-/** Point under the station (degrees), for the orbit view. */
+/** Point under the station (degrees), for the orbit view.
+ *  One continuous orbit. The "re-aim" that brings it back over Minneapolis each pass (it
+ *  undoes the Earth's turn, about 23 degrees a orbit) is spread smoothly over the far side,
+ *  so the track never jumps. Near each pass it is exactly the real geometry. */
 export function subPoint(t: number): { lat: number; lon: number } {
-  const dt = fromCentre(t);
+  const dt = t - FIRST_PASS;
   const phi = (MPLS.lat * Math.PI) / 180;
   const u0 = Math.asin(Math.sin(phi) / Math.sin(INC)); // ascending (moving north-east)
   const u = u0 + (2 * Math.PI * dt) / ORBIT;
   const lat = Math.asin(Math.sin(INC) * Math.sin(u));
   const li = (uu: number) => Math.atan2(Math.cos(INC) * Math.sin(uu), Math.cos(uu));
-  let lon = (MPLS.lon * Math.PI) / 180 + li(u) - li(u0) - EARTH_TURN * dt;
+  let lon = (MPLS.lon * Math.PI) / 180 + li(u) - li(u0) - EARTH_TURN * dt + EARTH_TURN * ORBIT * reAim(dt / ORBIT);
   lon = ((((lon + Math.PI) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)) - Math.PI;
   return { lat: (lat * 180) / Math.PI, lon: (lon * 180) / Math.PI };
+}
+/** Orbits of re-aim done by orbit-phase x: whole numbers near each pass (|frac| < 0.3),
+ *  a smooth S-curve in between (on the far side, where nobody is looking). */
+export function reAim(x: number): number {
+  const k = Math.floor(x + 0.5); // nearest pass
+  const f = x - k; // -0.5..0.5
+  if (f <= 0.3 && f >= -0.3) return k;
+  // From k (at f = 0.3) to k + 1 (at f = 0.7, i.e. the next pass's -0.3).
+  const g = f > 0 ? (f - 0.3) / 0.4 : (f + 0.7) / 0.4; // 0..1 across the gap
+  const base = f > 0 ? k : k - 1;
+  return base + g * g * (3 - 2 * g);
 }
 
 /** Great-circle distance in km. */

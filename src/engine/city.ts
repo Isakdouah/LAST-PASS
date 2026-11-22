@@ -389,9 +389,9 @@ export class CityLayer {
     this.shadows.count = 0;
     this.scene.add(this.shadows);
     // Cars on the move: one shape, many paint colours (multiplied in).
-    this.cars = new THREE.InstancedMesh(vehicleGeometry('car', 0xffffff), vehicleMat, 400);
+    this.cars = new THREE.InstancedMesh(vehicleGeometry('car', 0xffffff), vehicleMat, 900);
     this.cars.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.cars.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(400 * 3), 3);
+    this.cars.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(900 * 3), 3);
     this.cars.frustumCulled = false;
     this.cars.renderOrder = 0.6;
     this.cars.count = 0;
@@ -680,12 +680,12 @@ export class CityLayer {
       cellToLocal(a.x, a.y, p);
       if (a.kind === Kind.Living && a.car === 1) {
         // Driving away: a car, facing the way it goes.
-        if (nc < 400) {
+        if (nc < 900) {
           q.setFromAxisAngle(yAxis, -a.face + Math.PI / 2);
           p.y = 0;
           m.compose(p, q, sc.set(VEHICLE_SCALE, VEHICLE_SCALE, VEHICLE_SCALE));
           CS.setMatrixAt(nc, m);
-          cc.setHex(CAR_COLOURS[Math.floor(hash(k * 977) * CAR_COLOURS.length)]);
+          cc.setHex(CAR_COLOURS[Math.floor(hash(a.uid * 977) * CAR_COLOURS.length)]);
           CS.setColorAt(nc, this.thermal ? THERM.warm : cc);
           nc++;
         }
@@ -743,6 +743,20 @@ export class CityLayer {
     }
     SH.count = ns;
     SH.instanceMatrix.needsUpdate = true;
+    // Wrecks: crashed cars burnt dark and knocked askew, abandoned ones dimmed, all where they stopped.
+    for (const w of st.wrecks) {
+      if (nc >= 900) break;
+      cellToLocal(w.x, w.y, p);
+      p.y = 0;
+      q.setFromAxisAngle(yAxis, -w.face + Math.PI / 2 + (w.crashed ? (hash(w.uid) - 0.5) * 0.9 : 0));
+      m.compose(p, q, sc.set(VEHICLE_SCALE, VEHICLE_SCALE, VEHICLE_SCALE));
+      CS.setMatrixAt(nc, m);
+      if (this.thermal) cc.copy(w.burn > 0 ? THERM.warm : THERM.cool);
+      else if (w.crashed) cc.setHex(w.burn > 0 ? 0x3a2a20 : 0x2a2622);
+      else cc.setHex(CAR_COLOURS[Math.floor(hash(w.uid * 977) * CAR_COLOURS.length)]).multiplyScalar(0.55);
+      CS.setColorAt(nc, cc);
+      nc++;
+    }
     CS.count = nc;
     CS.instanceMatrix.needsUpdate = true;
     if (CS.instanceColor) CS.instanceColor.needsUpdate = true;
@@ -864,6 +878,20 @@ export class CityLayer {
         // The beam on the road.
         cellToLocal(a.x + fx * L * 3, a.y + fy * L * 3, p);
         add(p.x, 0.3, p.z, 8, 0.9, 0.85, 0.6, 0.12);
+      }
+      // A burning wreck: flames, and orange light on the road around it.
+      for (const w of st.wrecks) {
+        if (w.burn <= 0) continue;
+        cellToLocal(w.x, w.y, p);
+        const fl = 0.75 + 0.25 * Math.sin(time * 17 + w.uid);
+        add(p.x, 1.6, p.z, 5 * fl, 1.0, 0.55, 0.15, 0.9);
+        add(p.x, 0.4, p.z, 14, 1.0, 0.45, 0.1, 0.18 * fl);
+      }
+      // Hazard lights blinking on cars left in the jam.
+      for (const w of st.wrecks) {
+        if (w.crashed || Math.floor(time * 1.6 + hash(w.uid)) % 2) continue;
+        cellToLocal(w.x, w.y, p);
+        add(p.x, 0.9, p.z, 2.5, 1.0, 0.6, 0.1, 0.9);
       }
       for (const pf of st.puffs) {
         cellToLocal(pf.x, pf.y, p);

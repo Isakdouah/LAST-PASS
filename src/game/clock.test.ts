@@ -26,4 +26,11 @@ describe('realSeconds after the last pass', () => {
   it('returns Infinity instead of looping forever', () => {
     expect(realSeconds(0, Infinity)).toBe(Infinity);
   });
+
+  it('the orbit track never jumps (no dent between passes)', () => {
+    let worst = 0;
+    for (let t = 0; t < passCentre(5) + 3000; t += 20) worst = Math.max(worst, distanceKm(subPoint(t), subPoint(t + 20)));
+    // 20 s of flight is about 150 km on the ground; a jump would be thousands.
+    expect(worst).toBeLessThan(200);
+  });
 });

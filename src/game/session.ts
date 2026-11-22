@@ -11,6 +11,7 @@ import { CityMap, loadMap, MapFile } from '../map/loadMap';
 import { cleanPlaces, NamedPlace } from '../map/places';
 import { createFires, Fires, stepFires } from '../sim/fire';
 import { cloneWorld, count, DEFAULT_RULES, Env, step, World } from '../sim/outbreak';
+import { buildRoadNet, markCovered, RoadNet } from '../sim/roadnet';
 import { enterStreet, equip, Kind, leaveStreet, newAgent, stepStreet, Street } from '../sim/street';
 import type { Sound } from '../audio';
 import { eventsBetween, WorldEvent } from './world';
@@ -119,6 +120,9 @@ function roads(): Uint8Array {
   }
   return (roadGrid = g);
 }
+/** The road network cars drive on (built on first use, about 0.4 s). */
+let net: RoadNet | null = null;
+export const roadNet = () => (net ??= markCovered(buildRoadNet(det.roads), blocked));
 /** Can a car drive here? (On the road grid, about 10 m squares.) */
 export const onRoad = (x: number, y: number) => {
   const X = Math.floor(x * OCC), Y = Math.floor(y * OCC);
@@ -787,7 +791,7 @@ export class Session {
       }
     }
     if (s && streetVisible) {
-      stepStreet(s, this.world, this.tick * 7919 + Math.floor(now), Math.min(0.3, gameDt), blocked, this.env(), onRoad);
+      stepStreet(s, this.world, this.tick * 7919 + Math.floor(now), Math.min(0.3, gameDt), blocked, this.env(), onRoad, roadNet());
       this.drainExits(s);
     }
     this.updateSmoke(gameDt, zone);

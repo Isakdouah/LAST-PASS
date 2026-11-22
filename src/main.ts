@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import { Sound } from './audio';
 import { fmt, inWindow, localTime, MPLS, realSeconds, subPoint, untilWindow, passIndex } from './game/clock';
 import { tuned } from './game/radio';
-import { Box, GH, GW, Mode, places, Session, CELL_X } from './game/session';
+import { Box, GH, GW, Mode, places, Session, CELL_X, roadNet } from './game/session';
 import { Pixel } from './engine/pixel';
 import { Globe, cityLights } from './engine/globe';
 import { CityLayer, cellToLocal, localToCell } from './engine/city';
@@ -74,9 +74,12 @@ let view: View = 'cupola';
 const tele = new Telescope();
 const look = { yaw: 0, pitch: 0 }; // cupola: 0,0 = straight down, top of picture = flight direction
 const orbitCam = { yaw: 2.4, pitch: 0.35, dist: 75 };
+/** Outside view distance from the station, metres: close on the hull out to the whole Earth. */
+const OUT_MIN = 18, OUT_MAX = 2.6e7;
 const pose = newPose();
 const fromPose = newPose();
 let blend = 1; // 1 = done
+let blendSecs = 1.1;
 let thermal = false;
 let playerName = 'Astronaut';
 try {
@@ -86,8 +89,10 @@ try {
 }
 const handAct = { tune: 0, talk: 0 };
 
-function setView(v: View) {
+function setView(v: View, secs = 1.1) {
   if (v === view) return;
+  blendSecs = secs;
+  tele.follow = false;
   fromPose.pos.copy(pose.pos);
   fromPose.quat.copy(pose.quat);
   fromPose.fov = pose.fov;
@@ -113,7 +118,11 @@ function poseCupola(out: Pose) {
   out.fov = 80;
 }
 function poseOutside(out: Pose) {
+  // Close in: circle the station. Far out: the centre slides to the middle of the Earth, so
+  // the whole planet sits in the picture with the station on it.
   const c = new THREE.Vector3(-6, 0, 0);
+  const far = THREE.MathUtils.clamp((Math.log(orbitCam.dist) - Math.log(2e5)) / (Math.log(OUT_MAX) - Math.log(2e5)), 0, 1);
+  if (far > 0) c.lerp(stFrame.toLocal(new THREE.Vector3(0, 0, 0)), far * far * (3 - 2 * far));
   const p = new THREE.Vector3(
     Math.cos(orbitCam.pitch) * Math.cos(orbitCam.yaw),
     Math.sin(orbitCam.pitch),
@@ -273,19 +282,28 @@ canvas.addEventListener(
     e.preventDefault();
     sound.start();
     if (mode !== 'play' && mode !== 'sandbox') return;
+    // One zoom ladder, always tied to the station: street ... telescope ... Cupola (you) ...
+    // outside the station ... the whole planet. Zooming back in always brings you home.
     if (view === 'cupola') {
       if (e.deltaY < 0) setView('tele');
+      else {
+        orbitCam.dist = 30;
+        setView('outside');
+      }
       return;
     }
     if (view === 'outside') {
-      orbitCam.dist = THREE.MathUtils.clamp(orbitCam.dist * Math.exp(e.deltaY * 0.001), 18, 260);
+      if (e.deltaY < 0 && orbitCam.dist <= OUT_MIN * 1.001) return setView('cupola');
+      const k = orbitCam.dist > 2000 ? 0.0022 : 0.0012;
+      orbitCam.dist = THREE.MathUtils.clamp(orbitCam.dist * Math.exp(e.deltaY * k), OUT_MIN, OUT_MAX);
       return;
     }
+    if (e.deltaY > 0 && tele.tD >= tele.ceiling * 0.999) return setView('cupola', 1.6);
     // Zoom toward the point under the mouse, so you can aim while zooming.
     const f = Math.exp(e.deltaY * 0.0012);
     if (f < 1 && !tele.flying) {
       // Move the aim by the same share as the zoom, measured from what is on screen now.
-      const p = pick(e.clientX, e.clientY);
+      const p = tele.follow ? null : pick(e.clientX, e.clientY);
       if (p) {
         const k = (1 - f) * 0.9;
         let dl = p.lon - tele.lon;
@@ -324,13 +342,12 @@ window.addEventListener('keydown', (e) => {
   if (k === '2') setView('outside');
   if (k === '3') setView('tele');
   if (k === 'f' || k === 'F') {
-    // Snap the telescope back to the ground under the station.
-    const s = subPoint(game.t);
-    if (view !== 'tele') setView('tele');
-    tele.tLat = s.lat;
-    tele.tLon = s.lon;
-    tele.tD = Math.max(tele.floor, ALT_ISS);
-    tele.flying = true;
+    // In the telescope: lock onto the station and ride along with it. Elsewhere: back to your seat.
+    if (view === 'tele') {
+      tele.follow = true;
+      tele.tD = Math.max(tele.floor, ALT_ISS);
+      hud.say('', 'Locked on the station: the telescope rides along. Drag to look away, scroll out to return to the Cupola.', 5);
+    } else setView('cupola');
   }
   if (k === 'g' || k === 'G') {
     if (view !== 'tele') setView('tele');
@@ -494,6 +511,17 @@ function frame(now: number) {
 
   // Camera pose for the current view.
   tele.floor = teleFloor().floor;
+  tele.ceiling = Math.max(tele.floor, ALT_ISS * 1.25);
+  if (tele.follow) {
+    const s = station(game.t);
+    const { e, n } = enu(s.lat, s.lon);
+    tele.tLat = s.lat;
+    tele.tLon = s.lon;
+    tele.tHeading = Math.atan2(s.fwd.dot(e), s.fwd.dot(n));
+    // Riding along: no easing lag, or the aim trails behind a station doing 7.7 km/s.
+    tele.lat = s.lat;
+    tele.lon = s.lon;
+  }
   tele.update(realDt);
   if (!playing) {
     orbitCam.yaw = 2.2 + time * 0.03;
@@ -504,7 +532,7 @@ function frame(now: number) {
   else if (view === 'outside') poseOutside(tPose);
   else tele.pose(tPose);
   if (blend < 1) {
-    blend = Math.min(1, blend + realDt / 1.1);
+    blend = Math.min(1, blend + realDt / blendSecs);
     const e = blend * blend * (3 - 2 * blend);
     blendPose(fromPose, tPose, e, pose);
   } else {
@@ -558,7 +586,7 @@ function frame(now: number) {
       pa.setXYZ(k, tmp.x, tmp.y, tmp.z);
     }
     pa.needsUpdate = true;
-    track.visible = playing && view === 'tele' && tele.d > 500;
+    track.visible = playing && view === 'outside' && orbitCam.dist > 3e5;
   }
 
   // Cameras for each layer.
@@ -712,7 +740,8 @@ function drawLabels() {
   };
   const camPos = pose.pos;
   const alt = camPos.length() - R_EARTH;
-  if (view === 'tele' && alt > 2.5) {
+  const farOut = view === 'outside' && orbitCam.dist > 2e5;
+  if ((view === 'tele' || farOut) && alt > 2.5) {
     // Town names: re-chosen a few times a second, moved with the globe every frame.
     const now = performance.now();
     if (now - townsAt > 150) {
@@ -734,7 +763,7 @@ function drawLabels() {
       if (p) hud.label(p.x, p.y - 3, n.code >= BIG ? n.name.toUpperCase() : n.name, n.code >= BIG ? 'town big' : 'town');
     }
   } else towns = [];
-  if (view === 'tele' && alt > 25) {
+  if ((view === 'tele' || farOut) && alt > 25) {
     const m = ecef(MPLS.lat, MPLS.lon, 0);
     if (m.clone().normalize().dot(camPos.clone().sub(m)) > 0) {
       const p = toScreen(m, camGlobe);
@@ -765,7 +794,26 @@ function drawLabels() {
   }
 }
 
+// When the city goes over the horizon you are pulled back up into your seat; when it comes
+// back, the telescope (if you are in it) swings round to it.
+game.onWindow = (open: boolean) => {
+  if (mode !== 'play') return;
+  if (!open) {
+    if (view === 'tele') setView('cupola', 2.6);
+    return;
+  }
+  if (view === 'tele') {
+    tele.follow = false;
+    tele.tLat = MPLS.lat;
+    tele.tLon = MPLS.lon;
+    tele.tD = 60;
+    tele.flying = true;
+  } else hud.say('', 'Minneapolis is in sight. Scroll in (or press G) to look.', 6);
+};
+
 requestAnimationFrame(frame);
+// Build the road network for cars while the title screen is up (it takes a moment).
+setTimeout(() => roadNet(), 800);
 
 // For automatic checks (screenshots, tests).
 (window as unknown as { lastPass: object }).lastPass = {
@@ -810,6 +858,7 @@ requestAnimationFrame(frame);
     }
     return { x: (bi % GW) + 0.5, y: Math.floor(bi / GW) + 0.5, v: best };
   },
+  state: () => ({ view, mode, d: tele.d, tD: tele.tD, floor: tele.floor, lat: tele.lat, lon: tele.lon, alpha: city.alpha }),
   /** Point the telescope at a place on Earth from d km. */
   lookAt: (lat: number, lon: number, d: number) => {
     setView('tele');

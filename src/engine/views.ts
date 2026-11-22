@@ -62,7 +62,11 @@ export class Telescope {
   tHeading = 0;
   /** Lowest allowed distance right now (km); the game rules set it. */
   floor: number = TELE.minD;
+  /** Highest allowed distance right now (km): above it you are back in the station. */
+  ceiling: number = TELE.maxD;
   flying = false;
+  /** Locked onto the station: the aim follows the ground under it. */
+  follow = false;
 
   tilt(d = this.d): number {
     const s = Math.max(0, Math.min(1, (Math.log(220) - Math.log(d)) / (Math.log(220) - Math.log(TELE.minD))));
@@ -86,10 +90,11 @@ export class Telescope {
     this.tLat = Math.max(-85, Math.min(85, this.tLat + (moveN / R_EARTH) / D));
     this.tLon += moveE / (R_EARTH * Math.max(0.1, Math.cos(this.tLat * D))) / D;
     this.flying = false;
+    this.follow = false;
   }
 
   zoom(factor: number) {
-    this.tD = Math.max(this.floor, Math.min(TELE.maxD, this.tD * factor));
+    this.tD = Math.max(this.floor, Math.min(this.ceiling, this.tD * factor));
   }
 
   update(dt: number) {
