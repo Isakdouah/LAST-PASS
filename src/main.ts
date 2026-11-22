@@ -520,7 +520,7 @@ function titleText() {
     <div>You are the last one up here. You cannot move anyone.</div>
     <div>You can look, listen, speak and connect people.</div><br>
     <div class="mark">[Enter] begin</div><br>
-    <div class="small">Headphones on. Rough draft 7: names, voices and lines are placeholders.<br>
+    <div class="small">Headphones on. Rough draft 9: names, voices and lines are placeholders.<br>
     Map data © OpenStreetMap contributors (ODbL). Place names and city lights: GeoNames (CC BY 4.0). Numbers are estimates.</div>`;
 }
 function endText() {
@@ -567,6 +567,9 @@ function frame(now: number) {
     // Auto quality: three slow seconds in a row and the picture gets a little coarser
     // (540, 460, then 380 pixels tall). Add ?hq to the address to switch this off.
     slowSecs = fps < 45 ? slowSecs + 1 : 0;
+    // Speed meter (bottom right): frames per second and picture height. Tell Claude this number.
+    hud.fps.textContent = `${Math.round(fps)} fps · ${px.lowHeight}p · cpu ${cpuAvg.toFixed(1)} ms`;
+    hud.fps.className = fps < 45 ? 'slow' : '';
     if (slowSecs >= 3 && px.lowHeight > 380 && !location.search.includes('hq')) {
       px.setLowHeight(px.lowHeight - 80);
       slowSecs = 0;

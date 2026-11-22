@@ -19,6 +19,7 @@ export class Hud {
   private lines: { who: string; text: string; until: number }[] = [];
   private last = 0;
   screen: HTMLDivElement;
+  fps: HTMLDivElement;
 
   constructor() {
     const mk = (id: string, cls = 'box') => {
@@ -34,6 +35,7 @@ export class Hud {
     this.sub = mk('sub');
     this.keys = mk('keys');
     this.credit = mk('credit');
+    this.fps = mk('fps', '');
     this.credit.innerHTML = 'Map data © OpenStreetMap contributors (ODbL) · place names + city lights: GeoNames (CC BY 4.0)';
     this.screen = document.createElement('div');
     this.screen.id = 'screenText';

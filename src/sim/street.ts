@@ -1000,7 +1000,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
 
       // A friend in its grip, close by: pull it off or hit it (and risk being next).
       let helping = false;
-      if (!a.ammo && (a.bold > 0.4 || a.weapon > 0) && a.fear < 1.01) {
+      if (!a.ammo && (a.bold > 0.8 || (a.weapon > 0 && a.bold > 0.6)) && countNear(a, isUp, m(10), 3) <= 1) {
         const v = nearest(a, (o) => o.kind === Kind.Living && o.held > 0 && o.held < PILE.civ, m(6), a);
         if (v) {
           const z = s.agents.find((o) => o.hold === v);
@@ -1013,13 +1013,13 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
               a.cooldown = SWING;
               const wpn = WEAPONS[a.weapon];
               const roll = r();
-              if (roll < 0.2 + wpn.kill * 2 + wpn.knock * 0.5) {
+              if (roll < 0.08 + wpn.kill * 1.5 + wpn.knock * 0.4) {
                 z.hold = null;
-                if (roll < wpn.kill * 2) (z.kind = Kind.Fallen), st.melee++, s.blood.push({ x: z.x, y: z.y });
+                if (roll < wpn.kill * 1.5) (z.kind = Kind.Fallen), st.melee++, s.blood.push({ x: z.x, y: z.y });
                 else z.down = 1.2;
                 st.rescues++;
                 release(v);
-              } else if (roll > 0.8) {
+              } else if (roll > 0.85) {
                 // It turns on the rescuer.
                 z.hold = null;
                 grab(z, a);
