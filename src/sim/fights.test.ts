@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createWorld, rng } from './outbreak';
-import { equip, Gun, Kind, newAgent, newStreet, Role, stepStreet } from './street';
+import { equip, Gun, Kind, newAgent, newStreet, PILE, Role, stepStreet, TURN } from './street';
 
 const NIGHT = { hour: 22, dark: 0.8, news: 0 };
 
@@ -82,16 +82,128 @@ describe('fights (street level)', () => {
     expect(none / 2000).toBeLessThan(0.55);
   });
 
-  it('the bitten keep going for a while, then turn', () => {
+  it('the bitten fall and shake where they are, then rise in 8-15 s, fast', () => {
+    for (let k = 0; k < 20; k++) {
+      const w = createWorld(10, 10);
+      const s = newStreet(0, 0, 10, 10);
+      const p = newAgent(5, 5, Kind.Living);
+      const z = newAgent(5.012, 5, Kind.Dead); // within reach
+      p.weapon = 0;
+      p.bold = 0;
+      s.agents.push(p, z);
+      let t = 0, bitAt = -1, x = 0, y = 0;
+      while (p.kind === Kind.Living && t < 200) {
+        stepStreet(s, w, k * 500 + t, 0.25);
+        t++;
+        if (bitAt < 0 && p.turn >= 0) (bitAt = t), (x = p.x), (y = p.y);
+        if (bitAt >= 0 && p.kind === Kind.Living) expect(Math.hypot(p.x - x, p.y - y)).toBeLessThan(1e-9); // lies still
+      }
+      if (bitAt < 0) continue; // killed it first, or got away
+      expect(p.kind).toBe(Kind.Dead);
+      const secs = (t - bitAt) * 0.25;
+      expect(secs).toBeGreaterThanOrEqual(TURN.min - 0.5);
+      expect(secs).toBeLessThanOrEqual(TURN.max + 0.5);
+      expect(p.fresh).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('the dead lunge before they grab (you can see it coming)', () => {
     const w = createWorld(10, 10);
     const s = newStreet(0, 0, 10, 10);
     const p = newAgent(5, 5, Kind.Living);
-    p.turn = 10;
-    s.agents.push(p);
-    for (let t = 0; t < 30; t++) stepStreet(s, w, t, 0.25);
-    expect(p.kind).toBe(Kind.Living);
-    for (let t = 0; t < 30; t++) stepStreet(s, w, 100 + t, 0.25);
-    expect(p.kind).toBe(Kind.Dead);
+    const z = newAgent(5 + 4 / 79, 5, Kind.Dead);
+    s.agents.push(p, z);
+    let lunged = false;
+    for (let t = 0; t < 8 && !lunged; t++) {
+      stepStreet(s, w, t, 0.25);
+      if (z.lunge > 0) lunged = true;
+    }
+    expect(lunged).toBe(true);
+  });
+
+  it('a grabbed pair stays locked together on the spot (no shaking)', () => {
+    let checked = 0;
+    for (let k = 0; k < 30 && checked < 5; k++) {
+      const w = createWorld(10, 10);
+      const s = newStreet(0, 0, 10, 10);
+      const p = newAgent(5, 5, Kind.Living);
+      p.bold = 0;
+      const z = newAgent(5.012, 5, Kind.Dead);
+      s.agents.push(p, z);
+      for (let t = 0; t < 4 && p.held === 0; t++) stepStreet(s, w, k * 100 + t, 0.25);
+      if (p.held === 0 || p.turn >= 0) continue;
+      const x = p.x, y = p.y;
+      for (let t = 0; t < 4 && p.held > 0; t++) {
+        stepStreet(s, w, k * 100 + 10 + t, 0.25);
+        if (p.held > 0) {
+          expect(Math.hypot(p.x - x, p.y - y)).toBeLessThan(1e-9);
+          expect(Math.hypot(z.x - p.x, z.y - p.y) * 79).toBeCloseTo(0.45, 1);
+        }
+      }
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+
+  it('two of the dead on one person kill them; the trained last until three', () => {
+    const pile = (role: Role, n: number) => {
+      const w = createWorld(10, 10);
+      const s = newStreet(0, 0, 10, 10);
+      const p = newAgent(5, 5, Kind.Living, 0, role);
+      p.grip = 5;
+      s.agents.push(p);
+      for (let j = 0; j < n; j++) {
+        const z = newAgent(5 + 0.006 * Math.cos(j * 2), 5 + 0.006 * Math.sin(j * 2), Kind.Dead);
+        z.hold = p;
+        s.agents.push(z);
+      }
+      stepStreet(s, w, 1, 0.25);
+      return p;
+    };
+    const civ = pile(Role.Civilian, PILE.civ);
+    expect(civ.kind).toBe(Kind.Fallen);
+    expect(civ.turn).toBe(-1); // eaten: they do not rise
+    expect(pile(Role.Police, 2).kind).toBe(Kind.Living);
+    expect(pile(Role.Police, PILE.trained).kind).toBe(Kind.Fallen);
+  });
+
+  it('friends can pull one of the dead off, and sometimes get grabbed instead', () => {
+    let rescues = 0, swapped = 0;
+    for (let k = 0; k < 200; k++) {
+      const w = createWorld(10, 10);
+      const s = newStreet(0, 0, 10, 10);
+      const p = newAgent(5, 5, Kind.Living);
+      p.grip = 6;
+      p.bold = 0;
+      const z = newAgent(5.006, 5, Kind.Dead);
+      z.hold = p;
+      const f = newAgent(5.03, 5, Kind.Living);
+      f.bold = 1;
+      f.weapon = 2; // baseball bat
+      s.agents.push(p, z, f);
+      for (let t = 0; t < 12; t++) stepStreet(s, w, k * 50 + t, 0.25);
+      rescues += s.stats.rescues;
+      if (z.hold === f || f.turn >= 0) swapped++;
+    }
+    expect(rescues).toBeGreaterThan(40);
+    expect(swapped).toBeGreaterThan(0);
+  });
+
+  it('shooting one of the dead off someone can hit the person it holds', () => {
+    let hurt = 0;
+    for (let k = 0; k < 60; k++) {
+      const w = createWorld(10, 10);
+      const s = newStreet(0, 0, 10, 10);
+      const p = newAgent(5, 5, Kind.Living);
+      p.grip = 20;
+      const z = newAgent(5.006, 5, Kind.Dead);
+      z.hold = p;
+      const cop = newAgent(5.2, 5, Kind.Living, 30, Role.Police);
+      s.agents.push(p, z, cop);
+      for (let t = 0; t < 20 && p.kind === Kind.Living; t++) stepStreet(s, w, k * 70 + t, 0.25, undefined, NIGHT);
+      if (p.kind === Kind.Fallen && s.stats.eaten === 0) hurt++;
+    }
+    expect(hurt).toBeGreaterThan(0);
   });
 
   it('people drive away on the road, and a crowd of cars jams', () => {

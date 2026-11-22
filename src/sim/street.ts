@@ -4,7 +4,10 @@
 // Every person has a skill, maybe a gun, maybe something to swing, and a temper.
 // Guns miss a lot (RAND: New York police hit 18-37% of shots); a hit is not a kill unless
 // it is the head; body hits knock the dead down (they get up), and some become crawlers.
-// Misses fly on and can hit the living. The bitten may hide it until they turn.
+// Misses fly on and can hit the living.
+// A catch is a sequence: the dead lunge, grab, and the pair go down together; the person
+// struggles and may break free or be pulled free by friends; two of the dead on one person
+// (three on the trained) is death; the bitten fall, convulse and rise fast in 8-15 s.
 // People run to their cars and drive, until the road jams.
 // Positions are in map cells (1 cell is about 79 m); speeds and ranges are set in metres
 // and seconds of game time, so the street looks right at any zoom.
@@ -89,8 +92,17 @@ export interface Agent {
   nxtTurn: number;
   /** Stable number for this person (colours, names), never reused. */
   uid: number;
-  /** Bitten: seconds until they turn (-1 = not bitten). They may hide it. */
+  /** Bitten: seconds until they turn (-1 = not bitten). They lie convulsing till then. */
   turn: number;
+  /** The dead: who they have hold of. */
+  hold: Agent | null;
+  /** The living: seconds of struggle left while held (0 = free), and how many hold them. */
+  grip: number;
+  held: number;
+  /** The dead: seconds left in a lunge (they crouch and leap). */
+  lunge: number;
+  /** The dead: seconds since they rose (fresh ones are fastest); -1 = not fresh. */
+  fresh: number;
   /** The dead: seconds still knocked down. */
   down: number;
   /** The dead: legs gone, crawling. */
@@ -143,6 +155,12 @@ export interface StreetStats {
   bites: number;
   /** Knocked-down dead that got back up: proof that only the head counts. */
   getUps: number;
+  /** Grabs; people killed by a pile-on; people who broke free; pulled free by friends; turned. */
+  grabs: number;
+  eaten: number;
+  freed: number;
+  rescues: number;
+  turned: number;
   crawlers: number;
   /** Cars that got out of the area. */
   drove: number;
@@ -224,9 +242,17 @@ const STRAY_HIT = 0.35; // chance it does (one of the dead, coming at you)
 const STRAY_LIVING = 0.08; // people duck, run, stand behind the shooter (guess)
 const RALLY = m(300); // how far a scared person will run to reach someone armed
 const SWING = 0.9; // seconds between swings
+const LUNGE = m(4.5); // the dead leap from this far
+const LUNGE_T = 0.5; // seconds a lunge takes (you can see it coming)
+/** Seconds until the bitten rise (ours, not the film's): 8 to 15. */
+export const TURN = { min: 8, max: 15 };
+const RISE = 1.2; // seconds getting up after turning
+const FRESH = 120; // seconds a new one stays extra fast
+/** How many of the dead holding someone kills them (trained people last longer). */
+export const PILE = { civ: 2, trained: 3 };
 
 export function emptyStats(): StreetStats {
-  return { shots: 0, hits: 0, heads: 0, stray: 0, fights: 0, melee: 0, bites: 0, getUps: 0, crawlers: 0, drove: 0, crashes: 0, abandoned: 0, cameOut: 0, caughtInside: 0 };
+  return { shots: 0, hits: 0, heads: 0, stray: 0, fights: 0, melee: 0, bites: 0, getUps: 0, grabs: 0, eaten: 0, freed: 0, rescues: 0, turned: 0, crawlers: 0, drove: 0, crashes: 0, abandoned: 0, cameOut: 0, caughtInside: 0 };
 }
 
 /** A new person or one of the dead. Old call shape kept: (x, y, kind, ammo, role). */
@@ -260,6 +286,11 @@ export function newAgent(x: number, y: number, kind: Kind, ammo = 0, role = Role
     nxtTurn: 0,
     uid: nextUid++,
     turn: -1,
+    hold: null,
+    grip: 0,
+    held: 0,
+    lunge: 0,
+    fresh: -1,
     down: 0,
     crawl: false,
     cooldown: 0,
@@ -460,12 +491,32 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     const cx = Math.floor(a.x), cy = Math.floor(a.y);
     return cx >= 0 && cy >= 0 && cx < world.width && cy < world.height ? world.calm[cy * world.width + cx] : 0;
   };
+  const trained = (p: Agent) => p.role === Role.Police || p.role === Role.Soldier;
+  /** Let go of p: every one of the dead holding them. */
+  const release = (p: Agent) => {
+    for (const o of s.agents) if (o.hold === p) o.hold = null;
+    p.grip = 0;
+    p.held = 0;
+  };
   const bitten = (p: Agent) => {
     if (p.turn < 0) {
-      p.turn = 20 + r() * 70; // they turn in a minute or so, and may hide it till then
+      p.turn = TURN.min + r() * (TURN.max - TURN.min); // they fall, shake, and rise fast
       st.bites++;
       s.blood.push({ x: p.x, y: p.y });
     }
+    release(p);
+    p.vx = p.vy = 0;
+  };
+  /** The dead get hold of p (or join the ones already on them). */
+  const grab = (z: Agent, p: Agent) => {
+    z.hold = p;
+    const ang = Math.atan2(z.y - p.y, z.x - p.x);
+    z.x = p.x + Math.cos(ang) * m(0.45);
+    z.y = p.y + Math.sin(ang) * m(0.45);
+    z.lunge = 0;
+    if (p.grip <= 0) (p.grip = 2 + r() * 4), st.grabs++;
+    p.held++;
+    p.vx = p.vy = 0;
   };
   const fire = (a: Agent, target: Agent, aimAtLiving: boolean) => {
     const metres = Math.sqrt(d2(a, target)) * M;
@@ -476,7 +527,12 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     const err = hit ? 0 : (r() < 0.5 ? -1 : 1) * (0.04 + r() * 0.2);
     const ang = Math.atan2(target.y - a.y, target.x - a.x) + err;
     const range = a.role === Role.Police ? RANGE.police : RANGE.civ;
-    s.bullets.push({ x: a.x, y: a.y, px: a.x, py: a.y, dx: Math.cos(ang) * BULLET_SPEED, dy: Math.sin(ang) * BULLET_SPEED, life: (range * 1.6) / BULLET_SPEED, target, hit, head, gun: a.gun, from: a });
+    // Shooting one of the dead off someone: a miss may hit the person it holds.
+    const held = !hit && !aimAtLiving ? target.hold : null;
+    if (held && held.kind === Kind.Living && r() < 0.35) {
+      const ang2 = Math.atan2(held.y - a.y, held.x - a.x);
+      s.bullets.push({ x: a.x, y: a.y, px: a.x, py: a.y, dx: Math.cos(ang2) * BULLET_SPEED, dy: Math.sin(ang2) * BULLET_SPEED, life: (range * 1.6) / BULLET_SPEED, target: held, hit: true, head: false, gun: a.gun, from: a });
+    } else s.bullets.push({ x: a.x, y: a.y, px: a.x, py: a.y, dx: Math.cos(ang) * BULLET_SPEED, dy: Math.sin(ang) * BULLET_SPEED, life: (range * 1.6) / BULLET_SPEED, target, hit, head, gun: a.gun, from: a });
     a.ammo--;
     a.cooldown = (a.role === Role.Police || a.role === Role.Soldier ? COOL.police : COOL.civ) * (0.8 + r() * 0.4);
     a.flash = 3;
@@ -767,7 +823,17 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
   // Bodies take up room. A 1 m grid of everyone on their feet (or crawling), so a step that
   // would walk into someone is turned aside or held back: crowds pack, they do not merge.
   const SEP = 0.6; // metres between two people's centres, at the closest
-  const walker = (a: Agent) => !a.gone && a.kind !== Kind.Fallen && a.car !== 1;
+  // Who holds whom: drop holds that no longer make sense, and count the holders.
+  for (const a of s.agents) if (a.kind === Kind.Living) a.held = 0;
+  for (const a of s.agents) {
+    const p = a.hold;
+    if (!p) continue;
+    if (a.kind !== Kind.Dead || a.down > 0 || a.gone || p.kind !== Kind.Living || p.gone || p.turn >= 0 || p.car === 1) a.hold = null;
+    else p.held++;
+  }
+  for (const a of s.agents) if (a.kind === Kind.Living && a.held === 0) a.grip = 0;
+  // Locked pairs and people on the ground are not pushed around (no more shaking).
+  const walker = (a: Agent) => !a.gone && a.kind !== Kind.Fallen && a.car !== 1 && !a.hold && a.held === 0 && !(a.kind === Kind.Living && a.turn >= 0);
   const G = 1000003;
   const CM = M / 2; // grid squares of 2 m
   const bodyGrid = new Map<number, Agent[]>();
@@ -808,16 +874,47 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     if (a.kind === Kind.Living) {
       // The bitten turn. Nobody can stop that.
       if (a.turn >= 0) {
+        if (a.car === 1) leaveCar(a, false);
+        a.car = 0;
         a.turn -= dt;
+        a.vx = a.vy = 0;
         if (a.turn <= 0) {
-          if (a.car === 1) leaveCar(a, false);
           a.kind = Kind.Dead;
           a.ammo = 0;
-          a.car = 0;
           a.down = 0;
+          a.fresh = 0;
           a.tgt = null;
+          st.turned++;
+        }
+        continue; // on the ground, shaking
+      }
+      // Held: struggle. Two of the dead (three on the trained) is the end.
+      if (a.held > 0) {
+        if (a.held >= (trained(a) ? PILE.trained : PILE.civ)) {
+          release(a);
+          a.kind = Kind.Fallen;
+          st.eaten++;
+          for (let k = 0; k < 3; k++) s.blood.push({ x: a.x + (r() - 0.5) * 0.01, y: a.y + (r() - 0.5) * 0.01 });
           continue;
         }
+        const wpn = WEAPONS[a.weapon];
+        let breakFree = 0.03 + wpn.kill * 1.2 + wpn.knock * 0.2 + a.bold * 0.05 + (trained(a) ? 0.3 : 0);
+        if (a.ammo > 0) breakFree += 0.2; // a shot point blank
+        if (r() < breakFree * dt) {
+          const z = s.agents.find((o) => o.hold === a);
+          if (a.ammo > 0) a.ammo--;
+          if (z) {
+            z.down = 1.5;
+            if (r() < (wpn.kill + (a.ammo > 0 ? 0.3 : 0)) * 0.5) (z.kind = Kind.Fallen), st.melee++;
+          }
+          st.freed++;
+          if (r() < 0.4) bitten(a); // it got its teeth in first
+          else release(a);
+          continue;
+        }
+        a.grip -= dt;
+        if (a.grip <= 0) bitten(a); // the bite lands; it lets go and looks for the next one
+        continue;
       }
       if (a.car === 1 && net) {
         drive(a);
@@ -901,6 +998,43 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       else a.fear = Math.max(0, a.fear - 0.03 * dt);
       const range = a.role === Role.Police ? RANGE.police : RANGE.civ;
 
+      // A friend in its grip, close by: pull it off or hit it (and risk being next).
+      let helping = false;
+      if (!a.ammo && (a.bold > 0.4 || a.weapon > 0) && a.fear < 1.01) {
+        const v = nearest(a, (o) => o.kind === Kind.Living && o.held > 0 && o.held < PILE.civ, m(6), a);
+        if (v) {
+          const z = s.agents.find((o) => o.hold === v);
+          if (z) {
+            if (d2(a, z) > (BITE * 1.2) ** 2) {
+              tx = z.x - a.x;
+              ty = z.y - a.y;
+              speed = SPEED.run;
+            } else if (a.cooldown <= 0) {
+              a.cooldown = SWING;
+              const wpn = WEAPONS[a.weapon];
+              const roll = r();
+              if (roll < 0.2 + wpn.kill * 2 + wpn.knock * 0.5) {
+                z.hold = null;
+                if (roll < wpn.kill * 2) (z.kind = Kind.Fallen), st.melee++, s.blood.push({ x: z.x, y: z.y });
+                else z.down = 1.2;
+                st.rescues++;
+                release(v);
+              } else if (roll > 0.8) {
+                // It turns on the rescuer.
+                z.hold = null;
+                grab(z, a);
+              }
+            }
+            if (speed > 0) {
+              a.face = Math.atan2(ty, tx);
+              helping = true;
+            } else {
+              a.vx = a.vy = 0;
+              continue;
+            }
+          }
+        }
+      }
       // Fear of the bitten: someone near you shows the signs. A scared person with a gun
       // may shoot them. A calm voice on the radio makes it rarer.
       if (a.ammo > 0 && a.fear > 0.5 && a.turn < 0 && a.cooldown <= 0 && r() < 0.04 * dt * (1 - 0.8 * cellCalm(a))) {
@@ -912,7 +1046,9 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         }
       }
 
-      if (a.ammo > 0 && z && d2(a, z) < range * range) {
+      if (helping) {
+        // On the way to help (direction set above).
+      } else if (a.ammo > 0 && z && d2(a, z) < range * range) {
         // Stand and shoot.
         a.face = Math.atan2(z.y - a.y, z.x - a.x);
         if (a.cooldown <= 0) fire(a, z, false);
@@ -1011,22 +1147,66 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         if (a.down <= 0 && !a.crawl) st.getUps++;
         continue;
       }
-      if (--a.think <= 0 || (a.tgt && (a.tgt.kind !== Kind.Living || a.tgt.gone))) {
-        a.tgt = nearest(a, (o) => o.kind === Kind.Living && !o.gone, HUNT);
+      if (--a.think <= 0 || (a.tgt && (a.tgt.kind !== Kind.Living || a.tgt.gone || a.tgt.turn >= 0 || a.tgt.held > 0))) {
+        // Someone free first; one already held only if nobody else is near (that is a pile-on).
+        a.tgt = nearest(a, (o) => o.kind === Kind.Living && !o.gone && o.turn < 0 && o.held === 0, HUNT) ?? nearest(a, (o) => o.kind === Kind.Living && !o.gone && o.turn < 0, m(25));
         a.think = 3 + Math.floor(r() * 3);
       }
+      if (a.fresh >= 0) {
+        a.fresh += dt;
+        if (a.fresh < RISE) continue; // getting up
+        if (a.fresh > FRESH) a.fresh = -1;
+      }
+      // Holding someone: stay locked on them, down on the ground together.
+      if (a.hold) {
+        const p = a.hold;
+        const ang = Math.atan2(a.y - p.y, a.x - p.x);
+        a.x = p.x + Math.cos(ang) * m(0.45);
+        a.y = p.y + Math.sin(ang) * m(0.45);
+        a.face = ang + Math.PI;
+        a.vx = a.vy = 0;
+        continue;
+      }
       const p = a.tgt;
-      const fast = a.crawl ? SPEED.crawl : SPEED.dead;
+      const fast = (a.crawl ? SPEED.crawl : SPEED.dead) * (a.fresh >= 0 ? 1.15 : 1);
+      let leap = false;
+      if (a.lunge < 0) {
+        a.lunge = Math.min(0, a.lunge + dt);
+        continue;
+      }
+      if (a.lunge > 0) {
+        a.lunge -= dt;
+        leap = true;
+        if (a.lunge <= 0) {
+          a.lunge = 0;
+          // Landed short: stumbles.
+          if (p && d2(a, p) > (BITE + m(SPEED.dead * 1.6) * dt) ** 2) {
+            a.lunge = -0.4; // stumbles (negative = getting its feet back)
+            continue;
+          }
+        }
+      }
       if (p) {
         tx = p.x - a.x;
         ty = p.y - a.y;
-        if (tx * tx + ty * ty < BITE * BITE) {
+        const dd = tx * tx + ty * ty;
+        if (!leap && !a.crawl && p.car !== 1 && dd < LUNGE * LUNGE && dd > BITE * BITE && a.cooldown <= 0) {
+          a.lunge = LUNGE_T; // crouch and leap
+          a.cooldown = 1.5;
+          leap = true;
+        }
+        // Contact if it can reach them this step (no leaping straight past).
+        const reach = BITE + m(leap ? fast * 1.6 : fast) * dt;
+        if (dd < reach * reach) {
           if (p.car === 1) {
             // A car: they claw at it; a stopped car is a trap.
             if (p.stuck > 1 && r() < 0.15 * dt) {
               bitten(p);
               leaveCar(p, false);
             }
+          } else if (p.held > 0) {
+            grab(a, p); // piles on
+            continue;
           } else if (p.turn < 0) {
             // Last chance: a swing with whatever they hold.
             const wpn = WEAPONS[p.weapon];
@@ -1040,10 +1220,11 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
               a.down = 1;
               continue;
             }
-            bitten(p);
+            grab(a, p); // got hold: both go down
+            continue;
           }
         }
-        speed = fast;
+        speed = leap ? fast * 1.6 : fast;
       } else {
         // No one in sight: go toward the nearest gunfire, else drift.
         let best: Mark | null = null;
