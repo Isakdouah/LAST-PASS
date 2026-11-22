@@ -236,11 +236,14 @@ function heroAt(sx: number, sy: number): string {
 }
 
 /** Hero blips on screen this frame (for clicking): id and screen position. */
-let blips: { id: string; x: number; y: number }[] = [];
+let blips: { id: string; x: number; y: number; w: number }[] = [];
+/** The hero whose label (or marker) is under the mouse. Labels sit just above their point. */
 function blipAt(sx: number, sy: number): string {
-  let best = '', bd = 26;
+  let best = '', bd = Infinity;
   for (const b of blips) {
-    const d = Math.hypot(b.x - sx, b.y - sy + 7);
+    const dx = Math.abs(sx - b.x), dy = b.y - sy; // dy > 0: above the point
+    if (dx > b.w / 2 + 8 || dy < -10 || dy > 26) continue;
+    const d = dx + Math.abs(dy - 8);
     if (d < bd) (bd = d), (best = b.id);
   }
   return best;
@@ -261,13 +264,19 @@ function heroClick(id: string) {
     closeCard();
     return;
   }
-  openCard(id);
-  if (hs.dead) return hud.say('', `${firstName(id)} does not answer.`, 3);
-  if (hs.out) return hud.say('', `${firstName(id)} is out of the city.`, 3);
+  // Clicking the one you already hold (or one who cannot talk) opens their ID card. The card
+  // stays shut while you pick, so it never covers the hero you want to patch to.
+  if (picked === id || hs.dead || hs.out) {
+    openCard(id);
+    if (hs.dead) hud.say('', `${firstName(id)} does not answer.`, 3);
+    else if (hs.out) hud.say('', `${firstName(id)} is out of the city.`, 3);
+    return;
+  }
+  closeCard();
   picked = id;
   game.setFreq(gr.freq);
   handAct.tune = 1.2;
-  if (!hs.link) hud.say('', `On ${gr.freq.toFixed(2)} MHz with ${firstName(id)}. Click another hero to patch them together. Right-click lets go.`, 7);
+  if (!hs.link) hud.say('', `On ${gr.freq.toFixed(2)} MHz with ${firstName(id)}. Click another hero to patch them together (click ${firstName(id)} again for their ID card).`, 7);
 }
 
 let mode: Mode | 'name' = 'title';
@@ -522,6 +531,11 @@ function endText() {
   h += `<div>The people you talked to:</div><div class="small">`;
   for (const g of r.groups) {
     if (g.kind === 'broadcast') continue;
+    const hs = game.heroState(g.id);
+    if (hs && (hs.out || hs.dead || hs.arrived || hs.link)) {
+      h += `${esc(g.name)}: ${esc(hs.fate || (hs.dead ? 'lost' : 'alive at dawn'))}<br>`;
+      continue;
+    }
     const fate = !g.known ? 'never heard from' : g.silent || g.status === 'overrun' ? g.fate || 'lost' : g.status === 'contact' ? 'still fighting at dawn' : 'alive at dawn';
     h += `${esc(g.name)}: ${fate}<br>`;
   }
@@ -772,7 +786,7 @@ function viewText() {
 function keysText() {
   const v = (x: View, k: string, n: string) => `<span class="${view === x ? 'mark' : ''}">${k} ${n}</span>`;
   let h = `${v('cupola', '1', 'Cupola')} &nbsp;${v('outside', '2', 'Outside')} &nbsp;${v('tele', '3', 'Telescope')}<br>`;
-  if (view === 'tele') h += 'Wheel zoom · drag move · right-drag turn · F station · G Minneapolis · click a hero for their card<br>';
+  if (view === 'tele') h += 'Wheel zoom · drag move · right-drag turn · F station · G Minneapolis · click a hero to talk, a second to patch, twice for their card<br>';
   else if (view === 'cupola') h += 'Drag to look around · wheel in: telescope<br>';
   else h += 'Drag to circle the station · wheel zoom<br>';
   h += 'Arrows tune · W warn · P patch · H "aim for the head" · D answer a rumour · T thermal · Space pause';
@@ -878,8 +892,15 @@ function drawLabels() {
       const rider = game.heroes.find((o) => o.riding && o.link?.with === hero.id);
       const name = firstName(hero.id) + (rider ? ` + ${firstName(rider.id)}` : '');
       const tag = st.dead ? ' · no contact' : st.out ? ' · out' : st.link ? (st.link.stage === 'waiting' ? ' · waiting' : ' · on the way') : '';
-      hud.label(p.x, p.y, `${st.dead ? '✕' : '◆'} ${name}${tag}`, `contact hero${picked === hero.id ? ' picked' : ''}${st.dead ? ' lost' : ''}`);
-      blips.push({ id: hero.id, x: p.x, y: p.y });
+      const text = `${st.dead ? '✕' : '◆'} ${name}${tag}`;
+      hud.label(p.x, p.y, text, `contact hero${picked === hero.id ? ' picked' : ''}${st.dead ? ' lost' : ''}`);
+      blips.push({ id: hero.id, x: p.x, y: p.y, w: text.length * 7.5 + 8 });
+    }
+    // Help on the way.
+    for (const c of game.radio.convoys) {
+      const p = at(c.x, c.y, 6);
+      if (p && p.x > 0 && p.x < W && p.y > 0 && p.y < H)
+        hud.label(p.x, p.y, c.bus ? `■ Bus 21 → ${c.to.name.split(',')[0]}` : `■ ${Math.round(c.people)} officers → ${c.to.name.split(',')[0]}`, 'contact');
     }
     // Where patched heroes meet, and the way out they chose.
     const shown = new Set<string>();

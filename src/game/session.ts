@@ -89,7 +89,7 @@ export const blocked = (x: number, y: number) => {
 };
 function freeSpot(x: number, y: number): [number, number] {
   let px = x + Math.random(), py = y + Math.random();
-  for (let k = 0; k < 6 && blocked(px, py); k++) (px = x + Math.random()), (py = y + Math.random());
+  for (let k = 0; k < 10 && (blocked(px, py) || wet(px, py)); k++) (px = x + Math.random()), (py = y + Math.random());
   return [px, py];
 }
 const cellAt = (x: number, y: number) => Math.floor(y) * GW + Math.floor(x);
@@ -121,6 +121,45 @@ function roads(): Uint8Array {
   }
   return (roadGrid = g);
 }
+// Where the water is, on the same 10 m grid (built on first use). Bridges are not water:
+// the road squares are taken back out. Even-odd fill, so islands stay dry.
+let wetGrid: Uint8Array | null = null;
+function wetSquares(): Uint8Array {
+  if (wetGrid) return wetGrid;
+  const W = GW * OCC, H = GH * OCC;
+  const out = new Uint8Array(W * H);
+  const s = det.water;
+  const xs: number[] = [];
+  for (let k = 0; k < s.count; k++) {
+    const o = s.off[k];
+    const n = s.off[k + 1] - o;
+    const y0 = Math.max(0, Math.floor(s.box[k * 4 + 1] * OCC));
+    const y1 = Math.min(H - 1, Math.ceil(s.box[k * 4 + 3] * OCC));
+    for (let Y = y0; Y <= y1; Y++) {
+      const py = (Y + 0.5) / OCC;
+      xs.length = 0;
+      for (let j = 0, i = n - 1; j < n; i = j++) {
+        const ax = s.xy[(o + i) * 2], ay = s.xy[(o + i) * 2 + 1];
+        const bx = s.xy[(o + j) * 2], by = s.xy[(o + j) * 2 + 1];
+        if (ay > py !== by > py) xs.push(ax + ((py - ay) / (by - ay)) * (bx - ax));
+      }
+      xs.sort((a, b) => a - b);
+      for (let q = 0; q + 1 < xs.length; q += 2) {
+        const X0 = Math.max(0, Math.ceil(xs[q] * OCC - 0.5));
+        const X1 = Math.min(W - 1, Math.floor(xs[q + 1] * OCC - 0.5));
+        for (let X = X0; X <= X1; X++) out[Y * W + X] ^= 1;
+      }
+    }
+  }
+  const rg = roads();
+  for (let i = 0; i < out.length; i++) if (rg[i]) out[i] = 0;
+  return (wetGrid = out);
+}
+/** Is this water (river, lake), where nobody walks? Bridges are dry. */
+export const wet = (x: number, y: number) => {
+  const X = Math.floor(x * OCC), Y = Math.floor(y * OCC);
+  return X >= 0 && Y >= 0 && X < GW * OCC && Y < GH * OCC && wetSquares()[Y * GW * OCC + X] === 1;
+};
 /** The road network cars drive on (built on first use, about 0.4 s). */
 let net: RoadNet | null = null;
 export const roadNet = () => (net ??= markCovered(buildRoadNet(det.roads), blocked));
@@ -282,6 +321,13 @@ setRouter((pts) => {
   }
   return out;
 });
+
+/** Path length (cells) from the start to point k. */
+function pathLengthTo(p: { x: number; y: number }[], k: number): number {
+  let n = 0;
+  for (let i = 1; i <= k; i++) n += Math.hypot(p[i].x - p[i - 1].x, p[i].y - p[i - 1].y);
+  return n;
+}
 
 export class Session {
   mode: Mode = 'title';
@@ -524,7 +570,20 @@ export class Session {
     for (let i = 0; i < fighting.length; i++) fighting[i] = w.fallen[i] - before[i];
     stepFires(this.fires, w, fighting, fireStations, this.tick * 13 + 5);
     const statusBefore = this.radio.groups.map((g) => g.status);
+    // Help that was sent drives along the streets, not through the river.
+    for (const c of this.radio.convoys) if (!c.path) (c.path = streetPath({ x: c.x, y: c.y }, { x: c.to.x, y: c.to.y })), (c.at = 0);
+    this.radio.arrivals.length = this.radio.lostConvoys.length = 0;
     stepRadio(this.radio, w, this.tick);
+    for (const c of this.radio.arrivals) {
+      const hs = this.heroState(c.to.id);
+      if (!hs || c.bus) continue;
+      hs.helpedAt = this.tick;
+      hs.log.push({ t: this.t, text: `${localTime(this.t)} ${Math.round(c.people)} officers from ${c.from.name} got through to them.` });
+    }
+    for (const c of this.radio.lostConvoys) {
+      const hs = this.heroState(c.to.id);
+      if (hs) hs.log.push({ t: this.t, text: `${localTime(this.t)} The officers sent from ${c.from.name} never made it. The dead stopped them on the way.` });
+    }
     this.radio.groups.forEach((g, k) => {
       const hs = this.heroState(g.id);
       if (hs && (hs.out || hs.link || (hs.escapeStart >= 0 && !hs.arrived))) {
@@ -586,7 +645,7 @@ export class Session {
     const mx = Math.ceil(vw * 0.3) + 1, my = Math.ceil(vh * 0.3) + 1;
     const x0 = Math.max(0, Math.floor(box.x0) - mx), y0 = Math.max(0, Math.floor(box.y0) - my);
     const x1 = Math.min(GW, Math.ceil(box.x1) + mx), y1 = Math.min(GH, Math.ceil(box.y1) + my);
-    this.street = enterStreet(this.world, x0, y0, x1 - x0, y1 - y0, MAX_AGENTS, this.tick + 1, policeCells, blocked, this.env());
+    this.street = enterStreet(this.world, x0, y0, x1 - x0, y1 - y0, MAX_AGENTS, this.tick + 1, policeCells, (x, y) => blocked(x, y) || wet(x, y), this.env());
     const w = this.world;
     for (let y = y0; y < y1; y++)
       for (let x = x0; x < x1; x++) {
@@ -855,6 +914,12 @@ export class Session {
         if (hs.link.role === 'driver') out.push([hs.link.meet, this.exitCell(hs.link.exit)]);
       }
     }
+    // Help on the way (police, the bus): what is left of their drive.
+    for (const c of this.radio.convoys) {
+      if (!c.path) continue;
+      const rest = c.path.filter((_, k) => k > 0 && pathLengthTo(c.path!, k) > (c.at ?? 0));
+      out.push([{ x: c.x, y: c.y }, ...rest]);
+    }
     return out;
   }
 
@@ -1079,7 +1144,7 @@ export class Session {
       }
     }
     if (s && streetVisible) {
-      stepStreet(s, this.world, this.tick * 7919 + Math.floor(now), Math.min(0.3, gameDt), blocked, this.env(), onRoad, roadNet());
+      stepStreet(s, this.world, this.tick * 7919 + Math.floor(now), Math.min(0.3, gameDt), blocked, this.env(), onRoad, roadNet(), wet);
       this.drainExits(s);
     }
     this.updateSmoke(gameDt, zone);

@@ -45,6 +45,38 @@ describe('street level', () => {
     expect(s.agents.every((a) => Math.floor(a.x) !== 5)).toBe(true);
   });
 
+  it('a crowd never piles into one spot: bodies keep their room', () => {
+    const w = createWorld(20, 20);
+    const s = newStreet(0, 0, 20, 20);
+    // 300 of the dead closing on one person in an open field.
+    for (let k = 0; k < 300; k++) s.agents.push(newAgent(8 + (k % 20) * 0.2, 8 + Math.floor(k / 20) * 0.2, Kind.Dead));
+    s.agents.push(newAgent(10, 10, Kind.Living));
+    let worst = 0;
+    for (let t = 0; t < 120; t++) {
+      stepStreet(s, w, t);
+      if (t < 40) continue;
+      const up = s.agents.filter((a) => a.kind !== Kind.Fallen && !a.gone);
+      let close = 0, pairs = 0;
+      for (let i = 0; i < up.length; i++)
+        for (let j = i + 1; j < up.length; j++) {
+          const d = Math.hypot(up[i].x - up[j].x, up[i].y - up[j].y) * 79;
+          if (d < 3) pairs++;
+          if (d < 0.4) close++;
+        }
+      worst = Math.max(worst, close / Math.max(1, pairs));
+    }
+    expect(worst).toBeLessThan(0.02); // almost nobody inside anyone else
+  });
+
+  it('nobody walks onto the river (fine water outline, not just whole cells)', () => {
+    const w = block();
+    // A river 30 m wide down the middle of cell 10.
+    const wet = (x: number, y: number) => x > 10.3 && x < 10.7 && !(y > 15 && y < 15.3); // with a bridge
+    const s = enterStreet(w, 0, 0, 20, 20, 10_000, 1, undefined, wet);
+    for (let t = 0; t < 300; t++) stepStreet(s, w, t, 0.25, undefined, undefined, undefined, undefined, wet);
+    expect(s.agents.filter((a) => a.kind !== Kind.Fallen && wet(a.x, a.y)).length).toBe(0);
+  });
+
   it('armed people shoot the dead and use up ammo', () => {
     const w = createWorld(10, 10);
     const s = newStreet(0, 0, 10, 10);

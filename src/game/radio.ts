@@ -7,6 +7,7 @@
 // The player never moves anyone. Every call costs trust when it is wrong.
 // All names and lines here are PLACEHOLDERS for ISAK to rewrite.
 import { rng, World } from '../sim/outbreak';
+import { pathLength, pathPoint } from './heroes';
 
 export type GroupKind = 'star' | 'police' | 'civil' | 'bus' | 'broadcast';
 export type Status = 'calm' | 'contact' | 'overrun';
@@ -39,6 +40,9 @@ export interface Convoy {
   armed: number;
   ammo: number;
   bus: boolean;
+  /** The way they drive (cells, along the streets; the session fills it in) and how far along. */
+  path?: { x: number; y: number }[];
+  at?: number;
 }
 
 export interface Radio {
@@ -46,6 +50,9 @@ export interface Radio {
   freq: number;
   patchFrom: Group | null;
   convoys: Convoy[];
+  /** Convoys that got there this step, and ones that did not make it (the session reports them). */
+  arrivals: Convoy[];
+  lostConvoys: Convoy[];
   stats: { warnRight: number; warnWrong: number; patches: number; refused: number; moved: number };
 }
 
@@ -67,6 +74,8 @@ export function createRadio(): Radio {
     freq: 144.5,
     patchFrom: null,
     convoys: [],
+    arrivals: [],
+    lostConvoys: [],
     stats: { warnRight: 0, warnWrong: 0, patches: 0, refused: 0, moved: 0 },
     groups: [
       // The three stars (placeholders).
@@ -325,8 +334,11 @@ export function stepRadio(r: Radio, w: World, tick: number): void {
   const keep: Convoy[] = [];
   for (const c of r.convoys) {
     const dx = c.to.x - c.x, dy = c.to.y - c.y;
-    const d = Math.hypot(dx, dy);
-    const v = c.bus ? 2 : 1.2; // cells per tick
+    let d = Math.hypot(dx, dy);
+    // Along the streets when there is a route: police cars about 30 km/h, the bus 25 (cells per
+    // one-minute tick); the old straight line otherwise.
+    const v = c.path ? (c.bus ? 5 : 6) : c.bus ? 2 : 1.2;
+    if (c.path) d = Math.max(0, pathLength(c.path) - (c.at ?? 0));
     const i = Math.floor(c.y) * w.width + Math.floor(c.x);
     if (!c.bus && w.infected[i] > 0) {
       // Fighting their way through.
@@ -340,6 +352,7 @@ export function stepRadio(r: Radio, w: World, tick: number): void {
       w.infected[i] += lost;
     }
     if (d <= v) {
+      r.arrivals.push(c);
       const j = Math.floor(c.to.y) * w.width + Math.floor(c.to.x);
       if (c.bus) {
         // Pick people up and take them to the safest contact.
@@ -358,9 +371,17 @@ export function stepRadio(r: Radio, w: World, tick: number): void {
       }
       continue;
     }
-    c.x += (dx / d) * v;
-    c.y += (dy / d) * v;
+    if (c.path) {
+      c.at = (c.at ?? 0) + v;
+      const p = pathPoint(c.path, c.at);
+      c.x = p.x;
+      c.y = p.y;
+    } else {
+      c.x += (dx / d) * v;
+      c.y += (dy / d) * v;
+    }
     if (c.people > 0.5 || c.bus) keep.push(c);
+    else r.lostConvoys.push(c);
   }
   r.convoys = keep;
 }

@@ -403,7 +403,7 @@ function isLand(world: World, x: number, y: number): boolean {
 
 /** One street-level step of `dt` game seconds. Mutates and returns the street.
  *  `onRoad` says where a car can drive (defaults to anywhere not blocked). */
-export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blocked: Blocked = open, env: Env = EVENING, onRoad: Blocked = anyRoad, net?: RoadNet): Street {
+export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blocked: Blocked = open, env: Env = EVENING, onRoad: Blocked = anyRoad, net?: RoadNet, wet: Blocked = open): Street {
   const r = rng(seed);
   s.shots = 0;
   const st = s.stats;
@@ -764,6 +764,40 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
   };
   for (const w of s.wrecks) if (w.burn > 0) w.burn = Math.max(0, w.burn - dt);
 
+  // Bodies take up room. A 1 m grid of everyone on their feet (or crawling), so a step that
+  // would walk into someone is turned aside or held back: crowds pack, they do not merge.
+  const SEP = 0.6; // metres between two people's centres, at the closest
+  const walker = (a: Agent) => !a.gone && a.kind !== Kind.Fallen && a.car !== 1;
+  const G = 1000003;
+  const CM = M / 2; // grid squares of 2 m
+  const bodyGrid = new Map<number, Agent[]>();
+  const walkers: Agent[] = [];
+  for (const a of s.agents)
+    if (walker(a)) {
+      walkers.push(a);
+      const k = Math.floor(a.y * CM) * G + Math.floor(a.x * CM);
+      let b = bodyGrid.get(k);
+      if (!b) bodyGrid.set(k, (b = []));
+      b.push(a);
+    }
+  /** Would standing at (x, y) put `a` inside someone (closer than before)? */
+  const bumps = (a: Agent, x: number, y: number): boolean => {
+    const X = Math.floor(x * CM), Y = Math.floor(y * CM);
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) {
+        const b = bodyGrid.get((Y + dy) * G + X + dx);
+        if (!b) continue;
+        for (const o of b) {
+          if (o === a || !walker(o)) continue;
+          const nd = ((o.x - x) * M) ** 2 + ((o.y - y) * M) ** 2;
+          if (nd >= SEP * SEP) continue;
+          const od = ((o.x - a.x) * M) ** 2 + ((o.y - a.y) * M) ** 2;
+          if (nd < od) return true;
+        }
+      }
+    return false;
+  };
+
   for (const a of s.agents) {
     if (a.kind === Kind.Fallen || a.gone) continue;
     if (a.flash > 0) a.flash--;
@@ -1044,12 +1078,26 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     const nx = a.x + vx;
     const ny = a.y + vy;
     const inBox = nx >= s.x0 && ny >= s.y0 && nx < s.x0 + s.w && ny < s.y0 + s.h;
-    let ok = inBox && isLand(world, nx, ny) && (!blocked(nx, ny) || blocked(a.x, a.y));
+    // Walls and water stop you (unless you are already in them: then you may climb out).
+    const free = (x: number, y: number) => isLand(world, x, y) && !blocked(x, y) && !wet(x, y);
+    let ok = inBox && (free(nx, ny) || (isLand(world, nx, ny) && (blocked(a.x, a.y) || wet(a.x, a.y))));
     let mx = nx, my = ny;
     if (!ok && inBox) {
       // Slide along walls: try moving on one axis only.
-      if (isLand(world, nx, a.y) && !blocked(nx, a.y)) (ok = true), (my = a.y);
-      else if (isLand(world, a.x, ny) && !blocked(a.x, ny)) (ok = true), (mx = a.x);
+      if (free(nx, a.y)) (ok = true), (my = a.y);
+      else if (free(a.x, ny)) (ok = true), (mx = a.x);
+    }
+    if (ok && a.car !== 1 && bumps(a, mx, my)) {
+      // Someone in the way: step round them, or wait.
+      ok = false;
+      for (const turn of [0.8, -0.8, 1.6, -1.6]) {
+        const c = Math.cos(turn), sn = Math.sin(turn);
+        const ux = vx * c - vy * sn, uy = vx * sn + vy * c;
+        if (free(a.x + ux, a.y + uy) && !bumps(a, a.x + ux, a.y + uy)) {
+          (mx = a.x + ux), (my = a.y + uy), (ok = true);
+          break;
+        }
+      }
     }
     if (ok) {
       a.x = mx;
@@ -1061,6 +1109,63 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       a.vx = (r() - 0.5) * step;
       a.vy = (r() - 0.5) * step;
     }
+  }
+
+  // Push apart whoever still overlaps (never into a wall or the water), and out of cars.
+  {
+    const grid = bodyGrid;
+    const canStand = (x: number, y: number) => isLand(world, x, y) && !blocked(x, y) && !wet(x, y);
+    const nudge = (a: Agent, dx: number, dy: number) => {
+      const x = a.x + dx / M, y = a.y + dy / M;
+      if (canStand(x, y)) (a.x = x), (a.y = y);
+      else if (canStand(x, a.y)) a.x = x;
+      else if (canStand(a.x, y)) a.y = y;
+    };
+    for (let pass = 0; pass < 2; pass++)
+      for (const a of walkers) {
+        const X = Math.floor(a.x * CM), Y = Math.floor(a.y * CM);
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const b = grid.get((Y + dy) * G + X + dx);
+            if (!b) continue;
+            for (let q = 0; q < b.length && q < 40; q++) {
+              const o = b[q];
+              if (o.uid <= a.uid) continue; // each pair once
+              let rx = (o.x - a.x) * M, ry = (o.y - a.y) * M;
+              let d2 = rx * rx + ry * ry;
+              if (d2 >= SEP * SEP) continue;
+              if (d2 < 1e-6) (rx = r() - 0.5), (ry = r() - 0.5), (d2 = rx * rx + ry * ry);
+              const d = Math.sqrt(d2), push = (SEP - d) / 2;
+              nudge(a, (-rx / d) * push, (-ry / d) * push);
+              nudge(o, (rx / d) * push, (ry / d) * push);
+            }
+          }
+      }
+    // Out of car bodies (cars and wrecks are about 4.4 x 1.8 m).
+    const pushOut = (cx: number, cy: number, face: number) => {
+      const fx = Math.cos(face), fy = Math.sin(face);
+      const X = Math.floor(cx * CM), Y = Math.floor(cy * CM);
+      for (let dy = -2; dy <= 2; dy++)
+        for (let dx = -2; dx <= 2; dx++) {
+          const b = grid.get((Y + dy) * G + X + dx);
+          if (b)
+            for (const a of b) {
+              const rx = (a.x - cx) * M, ry = (a.y - cy) * M;
+              const al = rx * fx + ry * fy, la = -rx * fy + ry * fx;
+              if (Math.abs(al) > 2.45 || Math.abs(la) > 1.15) continue;
+              // Out the nearer side.
+              if (2.45 - Math.abs(al) < 1.15 - Math.abs(la)) {
+                const k = (Math.sign(al) || 1) * 2.45 - al;
+                nudge(a, fx * k, fy * k);
+              } else {
+                const k = (Math.sign(la) || 1) * 1.15 - la;
+                nudge(a, -fy * k, fx * k);
+              }
+            }
+        }
+    };
+    for (const a of s.agents) if (a.car === 1 && !a.gone && a.kind === Kind.Living) pushOut(a.x, a.y, a.face);
+    for (const w of s.wrecks) if (w.x >= s.x0 && w.y >= s.y0 && w.x < s.x0 + s.w && w.y < s.y0 + s.h) pushOut(w.x, w.y, w.face);
   }
 
   // Bullets fly. A true shot hits its target when it gets there; anyone in the way, or

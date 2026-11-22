@@ -131,4 +131,26 @@ describe('heroes', () => {
     expect(leaveChance({ bond: 0.3, danger: 0, waited: 3 })).toBe(0);
     expect(leaveChance({ bond: 0.3, danger: 0, waited: 20 })).toBeGreaterThan(0); // nobody waits for ever
   });
+  it('police sent to St Paul drive there along the streets and report back', () => {
+    const g = new Session(quiet);
+    g.reset('play');
+    g.mode = 'sandbox';
+    g.world.infected.fill(0);
+    const gl = g.radio.groups.find((x) => x.id === 'gloria')!;
+    const p1 = g.radio.groups.find((x) => x.id === 'p1')!;
+    p1.trust = 1;
+    g.radio.freq = gl.freq;
+    g.doPatch();
+    g.radio.freq = p1.freq;
+    g.doPatch();
+    expect(g.radio.convoys.length).toBe(1);
+    for (let k = 0; k < 60 && g.radio.convoys.length; k++) {
+      g.world.infected.fill(0);
+      g.cityStep();
+      const c = g.radio.convoys[0];
+      if (c) expect(blocked(c.x, c.y)).toBe(false);
+    }
+    expect(g.radio.convoys.length).toBe(0);
+    expect(g.heroState('gloria')!.log.some((l) => /officers from MPD 1st Precinct got through/.test(l.text))).toBe(true);
+  });
 });
