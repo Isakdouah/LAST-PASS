@@ -23,6 +23,16 @@ describe('close-up people and houses', () => {
     expect(poseOf(z, 1).armL).toBeLessThan(-0.9); // reaching
   });
 
+  it('walking: the leg swinging forward bends its knee, the planted one stays straight', () => {
+    const p = newAgent(0, 0, Kind.Living);
+    p.vx = 0.01;
+    const a = poseOf(p, 0, Math.PI); // left leg coming through
+    expect(a.kneeL).toBeGreaterThan(0.5);
+    expect(a.kneeR).toBeLessThan(0.15);
+    const b = poseOf(p, 0, 0);
+    expect(b.kneeR).toBeGreaterThan(0.5);
+  });
+
   it('a house-sized rectangle gets a pitched roof along its long side; a big block does not', () => {
     const rect = (w: number, l: number, ang: number) =>
       [[-l / 2, -w / 2], [l / 2, -w / 2], [l / 2, w / 2], [-l / 2, w / 2]].map(([x, y]) => new THREE.Vector2(x * Math.cos(ang) - y * Math.sin(ang) + 10, x * Math.sin(ang) + y * Math.cos(ang) + 5));

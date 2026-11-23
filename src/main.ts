@@ -1041,9 +1041,24 @@ setTimeout(() => roadNet(), 800);
     if (!st) return null;
     const M = CELL_X;
     const walkers = st.agents.filter((a) => !a.gone && a.kind !== 2 && a.car !== 1);
-    let inBuilding = 0, inWater = 0, overlap = 0, inCar = 0, carOverlap = 0;
+    const inSample: Record<string, number | boolean>[] = [];
+    let atWall = 0, inBuilding = 0, inWater = 0, overlap = 0, inCar = 0, carOverlap = 0;
     for (const a of walkers) {
-      if (insideBuilding(a.x, a.y)) inBuilding++;
+      if (insideBuilding(a.x, a.y)) {
+        // Brushing a wall (under 0.6 m in, the fine wall map is 1.25 m squares) is counted
+        // apart from really being inside.
+        let deep = 99;
+        for (let r = 0.25; r < 30 && deep === 99; r += 0.25)
+          for (let k = 0; k < 16; k++) if (!insideBuilding(a.x + (Math.cos(k * 0.3927) * r) / M, a.y + (Math.sin(k * 0.3927) * r) / M)) (deep = r), (k = 99);
+        if (deep <= 0.6) {
+          atWall++;
+          continue;
+        }
+        inBuilding++;
+        if (inSample.length < 12) {
+          inSample.push({ deep, uid: a.uid, role: a.role, x: +a.x.toFixed(3), y: +a.y.toFixed(3), kind: a.kind, held: a.held, hold: !!a.hold, fresh: +a.fresh.toFixed(1), v: +(Math.hypot(a.vx, a.vy) * M).toFixed(2), car: a.car, age: +((a as unknown as { age?: number }).age ?? -1) });
+        }
+      }
       if (wet(a.x, a.y)) inWater++;
     }
     const grid = new Map<number, typeof walkers>();
@@ -1069,7 +1084,7 @@ setTimeout(() => roadNet(), 800);
     }
     for (let i = 0; i < cars.length; i++)
       for (let j = i + 1; j < cars.length; j++) if (Math.hypot(cars[i].x - cars[j].x, cars[i].y - cars[j].y) * M < 2.0) carOverlap++;
-    return { walkers: walkers.length, cars: cars.length, inBuilding, inWater, overlap, inCar, carOverlap, stepMs: +game.stepMs.toFixed(1), frameMs: +cpuAvg.toFixed(1), stats: st.stats };
+    return { walkers: walkers.length, cars: cars.length, inBuilding, atWall, inSample, inWater, overlap, inCar, carOverlap, stepMs: +game.stepMs.toFixed(1), frameMs: +cpuAvg.toFixed(1), stats: st.stats };
   },
   /** Point the telescope at a map cell from d km. */
   lookCell: (x: number, y: number, d: number) => {
