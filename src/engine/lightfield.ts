@@ -5,6 +5,7 @@
 // walking under a lamp lights up and goes dark again between lamps. The light comes in
 // a few hard steps, not a smooth blur: that is the pixel-art way.
 import * as THREE from 'three';
+import { liftProject, TERRAIN_PARS } from './terrain';
 
 export const FIELD = 512; // metres across
 const N = 256; // squares across
@@ -138,20 +139,12 @@ export class LightField {
 
 /** Make a plain (MeshBasic) material react to the light field: dim at night, lit under
  *  lamps and in headlights. Works for instanced and ordinary meshes. */
-export function litBasic(mat: THREE.MeshBasicMaterial, shared: Record<string, THREE.IUniform>, ambient = 0.42): THREE.MeshBasicMaterial {
+export function litBasic(mat: THREE.MeshBasicMaterial, shared: Record<string, THREE.IUniform>, ambient = 0.42, perVertex = false): THREE.MeshBasicMaterial {
   mat.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, shared, { litAmbient: { value: ambient } });
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vLW;')
-      .replace(
-        '#include <project_vertex>',
-        `#include <project_vertex>
-  vec4 lw = vec4(transformed, 1.0);
-  #ifdef USE_INSTANCING
-  lw = instanceMatrix * lw;
-  #endif
-  vLW = (modelMatrix * lw).xyz;`,
-      );
+      .replace('#include <common>', '#include <common>\nvarying vec3 vLW;\n' + TERRAIN_PARS)
+      .replace('#include <project_vertex>', liftProject(perVertex) + '\n  vLW = twFlat.xyz;');
     sh.fragmentShader = sh.fragmentShader
       .replace(
         '#include <common>',
@@ -174,6 +167,6 @@ ${LIGHT_PARS}`,
   #include <opaque_fragment>`,
       );
   };
-  mat.customProgramCacheKey = () => 'litBasic' + ambient;
+  mat.customProgramCacheKey = () => 'litBasic' + ambient + perVertex;
   return mat;
 }

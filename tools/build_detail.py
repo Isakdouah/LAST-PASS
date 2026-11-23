@@ -78,6 +78,9 @@ class Shapes:
 
 
 bld, roads, water, parks = Shapes(), Shapes(), Shapes(), Shapes()
+bridges = Shapes()  # every bridge deck (roads, paths, railways); meta = deck width in metres
+bridge_roads = []  # indices into roads of the road pieces that are bridges (not painted on the ground)
+BRIDGE_W = {'footway': 4, 'cycleway': 5, 'path': 4, 'pedestrian': 6, 'service': 6, 'rail': 7, 'light_rail': 7, 'abandoned': 7, 'disused': 7}
 names = {}
 places = []
 POI = {'police': 'police', 'fire_station': 'fire', 'hospital': 'hospital'}
@@ -93,6 +96,15 @@ class C(osmium.SimpleHandler):
 
     def way(self, w):
         hw = w.tags.get('highway')
+        rw = w.tags.get('railway')
+        is_bridge = w.tags.get('bridge') not in (None, 'no')
+        if is_bridge and (hw in ROAD_W or hw in BRIDGE_W or rw in BRIDGE_W):
+            try:
+                bp = [cell(n.lon, n.lat) for n in w.nodes]
+            except osmium.InvalidLocationError:
+                bp = None
+            if bp and inbox(bp):
+                bridges.add(bp, ROAD_W.get(hw) or BRIDGE_W.get(hw) or BRIDGE_W.get(rw))
         if hw not in ROAD_W:
             return
         try:
@@ -101,7 +113,10 @@ class C(osmium.SimpleHandler):
             return
         if inbox(pts):
             pts = list(LineString(pts).simplify(0.01).coords) if len(pts) > 2 else pts
+            before = len(roads.lens)
             roads.add(pts, ROAD_W[hw])
+            if is_bridge and len(roads.lens) > before:
+                bridge_roads.append(before)
 
     def area(self, a):
         t = a.tags
@@ -155,11 +170,12 @@ def bld_count():
 def main(src, dst):
     C().apply_file(src, locations=True)
     data = {'q': Q, 'buildings': bld.pack(), 'roads': roads.pack(), 'water': water.pack(), 'parks': parks.pack(),
+            'bridges': bridges.pack(), 'bridgeRoads': bridge_roads,
             'names': names, 'places': sorted(set(places))}
     with open(dst, 'w') as f:
         json.dump(data, f, separators=(',', ':'))
     print('buildings', len(bld.lens), 'roads', len(roads.lens), 'water', len(water.lens), 'parks', len(parks.lens),
-          'steps', len(bld.steps) // 2 + len(roads.steps) // 2, 'places', len(set(places)))
+          'steps', len(bld.steps) // 2 + len(roads.steps) // 2, 'places', len(set(places)), 'bridges', len(bridges.lens))
 
 
 if __name__ == '__main__':

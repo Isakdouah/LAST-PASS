@@ -12,6 +12,7 @@ import { Box, GH, GW, Mode, places, Session, CELL_X, roadNet, insideBuilding, we
 import { Pixel } from './engine/pixel';
 import { Globe, cityLights } from './engine/globe';
 import { CityLayer, cellToLocal, localToCell } from './engine/city';
+import { heightAt } from './engine/terrain';
 import { buildCupola, buildStation, drawLaptop, drawRadio } from './engine/station';
 import { arcKm, ALT_ISS, ecef, enu, FOOTPRINT_KM, latLonOf, R_EARTH, station, sunDir } from './engine/geo';
 import { blendPose, Frame, lookQuat, newPose, Pose, Telescope, TELE } from './engine/views';
@@ -168,9 +169,15 @@ function pickCell(sx: number, sy: number) {
   const ndc = new THREE.Vector2((sx / window.innerWidth) * 2 - 1, -(sy / window.innerHeight) * 2 + 1);
   const ray = new THREE.Raycaster();
   ray.setFromCamera(ndc, camCity);
-  const tt = -ray.ray.origin.y / ray.ray.direction.y;
-  if (!(tt > 0)) return null;
-  return localToCell(ray.ray.origin.clone().addScaledVector(ray.ray.direction, tt));
+  // The ground is not flat: meet the ray with the ground height, refined a few times.
+  let h = 0, c: { x: number; y: number } | null = null;
+  for (let k = 0; k < 4; k++) {
+    const tt = (h - ray.ray.origin.y) / ray.ray.direction.y;
+    if (!(tt > 0)) return c;
+    c = localToCell(ray.ray.origin.clone().addScaledVector(ray.ray.direction, tt));
+    h = heightAt(c.x, c.y);
+  }
+  return c;
 }
 
 // ---------- input ----------
@@ -520,8 +527,8 @@ function titleText() {
     <div>You are the last one up here. You cannot move anyone.</div>
     <div>You can look, listen, speak and connect people.</div><br>
     <div class="mark">[Enter] begin</div><br>
-    <div class="small">Headphones on. Rough draft 10: names, voices and lines are placeholders.<br>
-    Map data © OpenStreetMap contributors (ODbL). Place names and city lights: GeoNames (CC BY 4.0). Numbers are estimates.</div>`;
+    <div class="small">Headphones on. Rough draft 11: names, voices and lines are placeholders.<br>
+    Map data © OpenStreetMap contributors (ODbL). Place names and city lights: GeoNames (CC BY 4.0). Terrain: 3DEP, GMTED2010 and SRTM courtesy of the U.S. Geological Survey; ETOPO1 from NOAA (via AWS Terrain Tiles). Numbers are estimates.</div>`;
 }
 function endText() {
   const { alive, dead, fallen } = game.totals();
@@ -674,6 +681,9 @@ function frame(now: number) {
   camGlobe.updateProjectionMatrix();
   camGlobe.updateMatrixWorld();
   cityFrame.apply(pose, camCity);
+  // The city is drawn on real ground: ride the camera up and down with the ground where we look.
+  camCity.position.y += heightAt(lookCell.x, lookCell.y);
+  camCity.updateMatrixWorld();
   camCity.near = Math.max(0.3, camAlt * 0.05);
   camCity.updateProjectionMatrix();
   stFrame.apply(pose, camStation);
@@ -865,7 +875,7 @@ function drawLabels() {
   if (view === 'tele' && tele.d < 8 && city.alpha > 0.5) {
     const v = new THREE.Vector3();
     for (const pl of places) {
-      cellToLocal(pl.x, pl.y, v, 6);
+      cellToLocal(pl.x, pl.y, v, 6 + heightAt(pl.x, pl.y));
       const p = toScreen(v, camCity);
       if (p && p.x > 0 && p.x < W && p.y > 0 && p.y < H && v.distanceTo(camCity.position) < tele.d * 4000)
         hud.label(p.x, p.y, (pl.kind === 'police' ? '■ ' : pl.kind === 'fire' ? '▲ ' : '✚ ') + (pl.name || pl.kind), 'place');
@@ -878,7 +888,7 @@ function drawLabels() {
     const near = tele.d < 8 && city.alpha > 0.5;
     const at = (x: number, y: number, lift: number) => {
       if (near) {
-        cellToLocal(x, y, v, lift);
+        cellToLocal(x, y, v, lift + heightAt(x, y));
         return toScreen(v, camCity);
       }
       return toScreen(ecef(45.06 - (y / GH) * 0.19, -93.36 + (x / GW) * 0.36, 0, v), camGlobe);

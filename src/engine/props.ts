@@ -3,7 +3,7 @@
 // Nothing here comes from a survey of real trees: the places are chosen by rule (ISAK's
 // call, 22 Nov 2026): boulevard trees along house streets, groves in parks and woods,
 // trees on the river banks, a few in yards. 16 October: fall colours, some bare.
-import { det, blocked, roadNet, CELL_X, CELL_Y } from '../game/session';
+import { det, blocked, roadNet, wet, CELL_X, CELL_Y } from '../game/session';
 import { query, Shapes, TILE } from '../map/detail';
 import { nearAsphalt, nearestRoad } from '../sim/roadnet';
 
@@ -110,6 +110,7 @@ export function lampSpots(x0: number, y0: number, x1 = x0 + TILE, y1 = y0 + TILE
   const s = det.roads;
   const out: Lamp[] = [];
   for (const k of query(s, x0 - 0.3, y0 - 0.3, x1 + 0.3, y1 + 0.3)) {
+    if (det.bridgeRoads.has(k)) continue; // no lamp posts standing down in the river
     const wm = s.meta[k];
     const o = s.off[k], n = s.off[k + 1] - o;
     let carry = hash(k) * 40;
@@ -124,7 +125,7 @@ export function lampSpots(x0: number, y0: number, x1 = x0 + TILE, y1 = y0 + TILE
       while (carry < len) {
         const off = (wm / 2 + 0.8) * side;
         const x = ax + (ux * carry - uy * off) / CELL_X, y = ay + (uy * carry + ux * off) / CELL_Y;
-        if (x >= x0 && y >= y0 && x < x1 && y < y1 && !blocked(x, y) && !nearOtherRoad(k, x, y, 0.6)) out.push({ x, y, arm: Math.atan2(-ux * side, uy * side) });
+        if (x >= x0 && y >= y0 && x < x1 && y < y1 && !blocked(x, y) && !wet(x, y) && !nearOtherRoad(k, x, y, 0.6)) out.push({ x, y, arm: Math.atan2(-ux * side, uy * side) });
         carry += 40;
         side = -side;
       }
@@ -181,7 +182,7 @@ export function treeSpots(x0: number, y0: number, density = 1): Tree[] {
   const s = det.roads;
   for (const k of query(s, x0 - 0.3, y0 - 0.3, x1 + 0.3, y1 + 0.3)) {
     const wm = s.meta[k];
-    if (wm < 6 || wm > 13) continue;
+    if (wm < 6 || wm > 13 || det.bridgeRoads.has(k)) continue;
     const o = s.off[k], n = s.off[k + 1] - o;
     let carry = 4 + hash(k * 7) * 6;
     for (let j = 0; j + 1 < n; j++) {

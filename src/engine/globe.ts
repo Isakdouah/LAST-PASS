@@ -4,6 +4,7 @@
 // Ground outside the station's line of sight is shown grey and still: an old photo.
 import * as THREE from 'three';
 import landUrl from '../data/earth-land.png';
+import reliefUrl from '../data/earth-relief.png';
 import citiesFile from '../data/cities.json';
 import { R_EARTH } from './geo';
 
@@ -34,6 +35,7 @@ const FRAG = /* glsl */ `
 #include <common>
 #include <logdepthbuf_pars_fragment>
 uniform sampler2D land;
+uniform sampler2D relief;
 uniform sampler2D lights;
 uniform vec3 sun;
 uniform vec3 foot;
@@ -45,6 +47,11 @@ uniform float lightsFade;
 varying vec3 vN;
 varying vec3 vW;
 ${NOISE}
+/** Real height (m) from the relief map: 128 = sea level, square-root scale to 8,000 m. */
+float hgt(vec2 uv) {
+  float v = (texture2D(relief, uv).r * 255.0 - 128.0) / 127.0;
+  return sign(v) * v * v * 8000.0;
+}
 void main() {
   #include <logdepthbuf_fragment>
   vec3 n = normalize(vN);
@@ -63,7 +70,22 @@ void main() {
   ground = mix(ground, tundra, smoothstep(55.0, 66.0, alat + nz * 6.0));
   ground = mix(ground, vec3(0.90, 0.92, 0.95), smoothstep(68.0, 74.0, alat + nz * 8.0));
   vec3 sea = mix(vec3(0.03, 0.10, 0.24), vec3(0.06, 0.18, 0.34), fbm(n * 9.0));
+  // Real relief: mountains are rock, the highest carry snow; shallow seas over the shelves are paler.
+  float hm = hgt(uv);
+  ground = mix(ground, vec3(0.36, 0.32, 0.27), smoothstep(1200.0, 3000.0, hm) * 0.8);
+  ground = mix(ground, vec3(0.92, 0.93, 0.96), smoothstep(5200.0, 6600.0, hm + (alat - 30.0) * 60.0));
+  sea = mix(sea, vec3(0.07, 0.24, 0.38), smoothstep(-600.0, -60.0, hm) * 0.7);
   vec3 col = mix(sea, ground, l);
+  // Slopes tilt the surface toward or away from the Sun (heights exaggerated 12x so you can read them).
+  vec3 nl = n;
+  {
+    float ex = 1.0 / 2048.0, ey = 1.0 / 1024.0;
+    float dx = (hgt(uv + vec2(ex, 0.0)) - hgt(uv - vec2(ex, 0.0))) / (2.0 * 6.2831853 * 6371000.0 * max(0.05, cos(lat)) * ex);
+    float dy = (hgt(uv + vec2(0.0, ey)) - hgt(uv - vec2(0.0, ey))) / (2.0 * 3.1415927 * 6371000.0 * ey);
+    vec3 east = normalize(vec3(-sin(lon), cos(lon), 0.0));
+    vec3 north = vec3(-sin(lat) * cos(lon), -sin(lat) * sin(lon), cos(lat));
+    nl = normalize(n - 12.0 * l * (dx * east + dy * north));
+  }
   // Clouds drift slowly eastward.
   vec3 cp = n * 5.0 + vec3(time * 0.004, 0.0, 0.0);
   float cl = smoothstep(0.52, 0.72, fbm(cp + fbm(cp * 2.0) * 0.6));
@@ -72,7 +94,8 @@ void main() {
   // Sunlight.
   float ndl = dot(n, sun);
   float day = smoothstep(-0.08, 0.18, ndl);
-  vec3 lit = col * (0.15 + 0.95 * clamp(ndl * 1.3 + 0.12, 0.0, 1.0));
+  float ndl2 = dot(nl, sun);
+  vec3 lit = col * (0.15 + 0.95 * clamp(ndl2 * 1.3 + 0.12, 0.0, 1.0));
   // Sunset band along the terminator.
   lit += vec3(0.35, 0.12, 0.02) * exp(-pow(ndl * 9.0, 2.0)) * 0.5;
   vec3 night = col * vec3(0.012, 0.016, 0.03) + vec3(0.004, 0.006, 0.012);
@@ -141,6 +164,8 @@ export class Globe {
 
   constructor() {
     const landTex = new THREE.TextureLoader().load(landUrl);
+    const reliefTex = new THREE.TextureLoader().load(reliefUrl);
+    reliefTex.colorSpace = THREE.NoColorSpace;
     landTex.minFilter = THREE.LinearFilter;
     landTex.generateMipmaps = false;
     this.lightsCanvas.width = 4096;
@@ -154,6 +179,7 @@ export class Globe {
       fragmentShader: FRAG,
       uniforms: {
         land: { value: landTex },
+        relief: { value: reliefTex },
         lights: { value: this.lightsTex },
         sun: { value: new THREE.Vector3(1, 0, 0) },
         foot: { value: new THREE.Vector3(1, 0, 0) },

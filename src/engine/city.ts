@@ -11,8 +11,10 @@ import { nearestRoad, pointAt } from '../sim/roadnet';
 import { CAR_COLOURS, CAR_STYLES, carLightsGeometry, SIZE, VEHICLE_SCALE, vehicleGeometry, VKind } from './vehicles';
 import { HEROES } from '../game/heroes';
 import { dressingGeometry, dressingSpots } from './dressing';
+import { bridgeGeometry, deckAt } from './bridges';
 import { Rig } from './rig';
 import { LightField, LIGHT_PARS, litBasic, MovingLight } from './lightfield';
+import { heightAt, lifted, terrainUniforms, TERRAIN_PARS } from './terrain';
 import { addHouse, box as hbox, Buf, fitHouse, K as HK } from './houses';
 import { query, Shapes, TILE } from '../map/detail';
 import { Kind, Role, Street } from '../sim/street';
@@ -35,10 +37,13 @@ float h21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32);
 
 // ---------- the ground ----------
 const GROUND_V = /* glsl */ `${LOG_V}
-varying vec2 vUv; varying vec3 vW;
+varying vec2 vUv; varying vec3 vW; varying float vTy;
+${TERRAIN_PARS}
 void main() {
   vUv = uv;
   vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz;
+  vTy = terrH(w.xz);
+  w.y += vTy;
   gl_Position = projectionMatrix * viewMatrix * w;
   #include <logdepthbuf_vertex>
 }`;
@@ -46,7 +51,8 @@ const GROUND_F = /* glsl */ `${LOG_F}
 uniform sampler2D map; uniform sampler2D over; uniform sampler2D overS;
 uniform vec2 grid; uniform vec2 cellM; uniform float time; uniform float alpha; uniform float dots; uniform float thermal;
 uniform float edgeFade;
-varying vec2 vUv; varying vec3 vW;
+varying vec2 vUv; varying vec3 vW; varying float vTy;
+${TERRAIN_PARS}
 ${HASH}
 ${LIGHT_PARS}
 void main() {
@@ -55,7 +61,43 @@ void main() {
   vec4 o = texture2D(over, (floor(cp) + 0.5) / grid);
   vec4 os = texture2D(overS, cp / grid);
   vec3 col = texture2D(map, vUv).rgb;
+  // Hill shading: moonlight from the north-west on the real slopes, in hard steps.
+  {
+    float e = 14.0;
+    float hx = terrH(vW.xz + vec2(e, 0.0)) - terrH(vW.xz - vec2(e, 0.0));
+    float hz = terrH(vW.xz + vec2(0.0, e)) - terrH(vW.xz - vec2(0.0, e));
+    vec3 n = normalize(vec3(-hx, 2.0 * e, -hz));
+    float lit = dot(n, normalize(vec3(-0.6, 0.55, -0.6))) - 0.55 * 0.9;
+    float sh = clamp(1.0 + lit * 2.2, 0.55, 1.35);
+    sh = floor(sh * 8.0 + 0.5) / 8.0;
+    if (terrOn > 0.5) col *= sh;
+  }
   float dark = smoothstep(0.2, 0.8, os.a);
+  // Water: a sky sheen toward the horizon and city light broken into ripples, the reflection
+  // of lamps pulled toward you in long streaks.
+  {
+    vec3 tex0 = col;
+    float water = step(0.09, tex0.b) * step(tex0.r * 1.9, tex0.b) * step(tex0.g * 1.3, tex0.b);
+    if (water > 0.5 && thermal < 0.5) {
+      vec3 vd = normalize(cameraPosition - vec3(vW.x, vTy, vW.z));
+      float fres = pow(1.0 - clamp(vd.y, 0.0, 1.0), 3.0);
+      col = mix(col, vec3(0.09, 0.11, 0.19), fres * 0.8);
+      // A lamp's reflection is a streak running from it toward the viewer.
+      vec2 dir = normalize(vd.xz + 1e-4);
+      float lamp = 0.0;
+      for (int k = 0; k < 6; k++) {
+        vec2 luv = (vW.xz - dir * (6.0 + float(k) * 9.0) - lightBox.xy) / lightBox.zw;
+        if (luv.x > 0.0 && luv.y > 0.0 && luv.x < 1.0 && luv.y < 1.0) lamp = max(lamp, texture2D(lampTex, luv).r * (1.0 - float(k) * 0.12));
+      }
+      lamp = lamp * lamp * (1.0 - dark) * 1.4;
+      // Ripples: short bright dashes across the streak, drifting with the current.
+      vec2 side = vec2(-dir.y, dir.x);
+      float across = dot(vW.xz, side), along = dot(vW.xz, dir);
+      float rip = step(0.55, h21(vec2(floor(along * 0.8 + time * 0.7), floor(across * 0.35))));
+      col += vec3(1.0, 0.62, 0.30) * lamp * (0.25 + 0.9 * rip);
+      col += vec3(0.5, 0.55, 0.7) * step(0.985, h21(floor(vW.xz * 0.7) + floor(time * 2.0))) * 0.08;
+    }
+  }
   // Power out: the sodium light is gone, only starlight.
   float warm = max(0.0, col.r - col.b);
   vec3 off = col - vec3(warm * 0.85, warm * 0.55, 0.0);
@@ -99,11 +141,14 @@ void main() {
 
 // ---------- buildings ----------
 const BLD_V = /* glsl */ `${LOG_V}
-attribute float aU; attribute float aSeed; attribute float aH; attribute float aK;
+attribute float aU; attribute float aSeed; attribute float aH; attribute float aK; attribute float aLift;
 varying vec3 vW; varying vec3 vN; varying float vU; varying float vSeed; varying float vH; varying float vK;
+uniform float terrOn;
 void main() {
   vU = aU; vSeed = aSeed; vH = aH; vN = normal; vK = aK;
   vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz;
+  // One lift per building (its lowest corner), walls carried 4 m into the ground on slopes.
+  w.y += (aLift - (position.y < 0.01 ? 4.0 : 0.0)) * terrOn;
   gl_Position = projectionMatrix * viewMatrix * w;
   #include <logdepthbuf_vertex>
 }`;
@@ -225,9 +270,12 @@ void main() {
 const PTS_V = /* glsl */ `${LOG_V}
 attribute float aSize; attribute vec4 aCol;
 varying vec4 vCol; uniform float scale;
+${TERRAIN_PARS}
 void main() {
   vCol = aCol;
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vec4 pw = modelMatrix * vec4(position, 1.0);
+  pw.y += terrH(pw.xz);
+  vec4 mv = viewMatrix * pw;
   gl_PointSize = clamp(aSize * scale / -mv.z, 1.0, 96.0);
   gl_Position = projectionMatrix * mv;
   #include <logdepthbuf_vertex>
@@ -265,12 +313,15 @@ interface Tile {
   ground: THREE.Mesh;
   bld: THREE.Mesh | null;
   cars: THREE.Mesh | null;
+  /** Bridge decks and piers (shown whenever the tile's buildings are). */
+  bridges: THREE.Mesh | null;
   lamps: THREE.InstancedMesh | null;
   /** Built a moment after the tile (they take a few hundredths of a second). */
   trees: TileTrees | null;
   used: number;
 }
 const vehicleMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true });
+const parkedMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true });
 const shadowMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.45, depthWrite: false, depthTest: false });
 
 export interface CarSpot {
@@ -289,7 +340,7 @@ export function parkedCarSpots(x0: number, y0: number): CarSpot[] {
   const out: CarSpot[] = [];
   for (const k of query(s, x0, y0, x0 + TILE, y0 + TILE)) {
     const wm = s.meta[k];
-    if (wm < 7 || wm >= 15) continue;
+    if (wm < 7 || wm >= 15 || det.bridgeRoads.has(k)) continue;
     const o = s.off[k], n = s.off[k + 1] - o;
     for (let j = 0; j + 1 < n; j++) {
       const ax = s.xy[(o + j) * 2], ay = s.xy[(o + j) * 2 + 1];
@@ -488,6 +539,7 @@ export class CityLayer {
       cellM: { value: new THREE.Vector2(CELL_X, CELL_Y) },
       time: { value: 0 },
       thermal: { value: 0 },
+      ...terrainUniforms(HALF_W, HALF_H),
     };
     // Whole-city ground picture, about 10 m per pixel.
     const c = document.createElement('canvas');
@@ -498,7 +550,7 @@ export class CityLayer {
     tex.colorSpace = THREE.NoColorSpace;
     tex.anisotropy = 4;
     this.baseMat = this.groundMat(tex, 1);
-    const g = new THREE.PlaneGeometry(GW * CELL_X, GH * CELL_Y);
+    const g = new THREE.PlaneGeometry(GW * CELL_X, GH * CELL_Y, GW, GH); // a vertex every cell, lifted onto the ground
     g.rotateX(-Math.PI / 2); // lie flat; uv v=1 is north (top of the picture)
     this.base = new THREE.Mesh(g, this.baseMat);
     this.base.renderOrder = -10;
@@ -530,6 +582,8 @@ export class CityLayer {
     this.scene.add(this.shadows);
     // Cars on the move: one shape, many paint colours (multiplied in).
     litBasic(vehicleMat, this.shared, 0.5);
+    litBasic(parkedMat, this.shared, 0.5, true); // parked cars and street furniture: every point on the ground
+    lifted(shadowMat, this.shared);
     this.cars = [];
     for (let st = 0; st < CAR_STYLES; st++) {
       const im = new THREE.InstancedMesh(vehicleGeometry('car', 0xffffff, st), vehicleMat, 900);
@@ -541,7 +595,7 @@ export class CityLayer {
       this.scene.add(im);
       this.cars.push(im);
     }
-    this.carLights = new THREE.InstancedMesh(carLightsGeometry(), new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), 900);
+    this.carLights = new THREE.InstancedMesh(carLightsGeometry(), lifted(new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), this.shared), 900);
     this.carLights.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.carLights.frustumCulled = false;
     this.carLights.renderOrder = 0.65;
@@ -555,20 +609,20 @@ export class CityLayer {
       v.visible = false;
       this.scene.add(v);
       this.heroVeh.set(h.id, v);
-      const f = new THREE.Mesh(figureGeometry(0), new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, color: 0xffe08a }));
+      const f = new THREE.Mesh(figureGeometry(0), lifted(new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, color: 0xffe08a }), this.shared));
       f.scale.setScalar(2.0);
       f.renderOrder = 1;
       f.visible = false;
       this.scene.add(f);
       this.heroFig.set(h.id, f);
     }
-    this.selBox = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.LineBasicMaterial({ color: 0xffd640, transparent: true, depthTest: false }));
+    this.selBox = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), lifted(new THREE.LineBasicMaterial({ color: 0xffd640, transparent: true, depthTest: false }), this.shared));
     this.selBox.renderOrder = 6;
     this.selBox.visible = false;
     this.scene.add(this.selBox);
     const bg = new THREE.CircleGeometry(1, 6);
     bg.rotateX(-Math.PI / 2);
-    this.blood = new THREE.InstancedMesh(bg, new THREE.MeshBasicMaterial({ color: 0x5a0e10, depthWrite: false, depthTest: false }), 4000);
+    this.blood = new THREE.InstancedMesh(bg, lifted(new THREE.MeshBasicMaterial({ color: 0x5a0e10, depthWrite: false, depthTest: false }), this.shared), 4000);
     this.blood.renderOrder = -5;
     this.blood.frustumCulled = false;
     this.blood.count = 0;
@@ -576,13 +630,13 @@ export class CityLayer {
     const tg = new THREE.BufferGeometry();
     tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(4000 * 6), 3).setUsage(THREE.DynamicDrawUsage));
     tg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(4000 * 6), 3).setUsage(THREE.DynamicDrawUsage));
-    this.tracers = new THREE.LineSegments(tg, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true }));
+    this.tracers = new THREE.LineSegments(tg, lifted(new THREE.LineBasicMaterial({ vertexColors: true, transparent: true }), this.shared, true));
     this.tracers.renderOrder = 2;
     this.tracers.frustumCulled = false;
     this.scene.add(this.tracers);
     const rg = new THREE.BufferGeometry();
     rg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6000 * 6), 3).setUsage(THREE.DynamicDrawUsage));
-    this.routeLine = new THREE.LineSegments(rg, new THREE.LineBasicMaterial({ color: 0xffd640, transparent: true, opacity: 0.9, depthTest: false }));
+    this.routeLine = new THREE.LineSegments(rg, lifted(new THREE.LineBasicMaterial({ color: 0xffd640, transparent: true, opacity: 0.9, depthTest: false }), this.shared, true));
     this.routeLine.renderOrder = 6;
     this.routeLine.frustumCulled = false;
     this.scene.add(this.routeLine);
@@ -594,7 +648,7 @@ export class CityLayer {
     this.ptsMat = new THREE.ShaderMaterial({
       vertexShader: PTS_V,
       fragmentShader: PTS_F,
-      uniforms: { scale: { value: 300 } },
+      uniforms: { scale: { value: 300 }, ...terrainUniforms(HALF_W, HALF_H) },
       transparent: true,
       depthWrite: false,
     });
@@ -700,6 +754,7 @@ export class CityLayer {
       tile.ground.visible = wantGround.has(key);
       if (tile.bld) tile.bld.visible = vis;
       if (tile.cars) tile.cars.visible = vis && d < 3;
+      if (tile.bridges) tile.bridges.visible = vis;
       if (tile.lamps) tile.lamps.visible = vis && d < 3;
       if (tile.trees) for (const m of tile.trees.meshes) m.visible = vis && d < 3;
       (tile.ground.material as THREE.ShaderMaterial).uniforms.dots.value = dots;
@@ -757,8 +812,12 @@ export class CityLayer {
   /** Where a hero is right now (local metres), for clicking and labels. null = not drawn. */
   heroPos(id: string): THREE.Vector3 | null {
     const f = this.heroFig.get(id), v = this.heroVeh.get(id);
-    if (f && f.visible) return f.position.clone().setY(2);
-    if (v && v.visible) return v.position.clone().setY(2);
+    const lift = (p: THREE.Vector3) => {
+      const c = localToCell(p);
+      return p.clone().setY(2 + heightAt(c.x, c.y));
+    };
+    if (f && f.visible) return lift(f.position);
+    if (v && v.visible) return lift(v.position);
     return null;
   }
 
@@ -853,7 +912,7 @@ export class CityLayer {
       tex.magFilter = THREE.NearestFilter;
       tex.minFilter = THREE.LinearMipmapLinearFilter;
       tex.anisotropy = 4;
-      const g = new THREE.PlaneGeometry(NC * CELL_X, NC * CELL_Y);
+      const g = new THREE.PlaneGeometry(NC * CELL_X, NC * CELL_Y, NC * 12, NC * 12);
       g.rotateX(-Math.PI / 2);
       this.nearGround = new THREE.Mesh(g, this.groundMat(tex, 1));
       this.nearGround.renderOrder = -8;
@@ -882,7 +941,7 @@ export class CityLayer {
     tex.colorSpace = THREE.NoColorSpace;
     tex.anisotropy = 4;
     tex.magFilter = THREE.NearestFilter; // crisp texels up close: pixel art, not blur
-    const g = new THREE.PlaneGeometry(TILE * CELL_X, TILE * CELL_Y);
+    const g = new THREE.PlaneGeometry(TILE * CELL_X, TILE * CELL_Y, TILE * 6, TILE * 6);
     g.rotateX(-Math.PI / 2);
     const ground = new THREE.Mesh(g, this.groundMat(tex, 1));
     cellToLocal(x0 + TILE / 2, y0 + TILE / 2, ground.position);
@@ -898,13 +957,20 @@ export class CityLayer {
     const cg = parkedCars(x0, y0);
     let cars: THREE.Mesh | null = null;
     if (cg) {
-      cars = new THREE.Mesh(cg, vehicleMat);
+      cars = new THREE.Mesh(cg, parkedMat);
       cars.renderOrder = 0.5;
       this.scene.add(cars);
     }
+    const bgeo = bridgeGeometry(x0, y0, (x, y, o) => cellToLocal(x, y, o));
+    let bridges: THREE.Mesh | null = null;
+    if (bgeo) {
+      bridges = new THREE.Mesh(bgeo, parkedMat);
+      bridges.renderOrder = 0.3;
+      this.scene.add(bridges);
+    }
     const lamps = buildLamps(lampSpots(x0, y0), this.propMat, (x, y, o) => cellToLocal(x, y, o));
     if (lamps) this.scene.add(lamps);
-    const tile = { key, ground, bld, cars, lamps, trees: null, used: this.frameNo };
+    const tile = { key, ground, bld, cars, bridges, lamps, trees: null, used: this.frameNo };
     this.tiles.set(key, tile);
     return tile;
   }
@@ -918,6 +984,10 @@ export class CityLayer {
     if (t.bld) {
       this.scene.remove(t.bld);
       t.bld.geometry.dispose();
+    }
+    if (t.bridges) {
+      this.scene.remove(t.bridges);
+      t.bridges.geometry.dispose();
     }
     if (t.cars) {
       this.scene.remove(t.cars);
@@ -978,11 +1048,15 @@ export class CityLayer {
       const jx = a.x - a.px, jy = a.y - a.py;
       if (jx * jx + jy * jy < 0.003) cellToLocal(a.px + jx * al, a.py + jy * al, p);
       else cellToLocal(a.x, a.y, p);
+      // On a bridge deck: raise them from the ground (under it) up to the deck.
+      const car = a.car === 1;
+      const dk = deckAt(a.x, a.y, car ? Math.cos(a.face) : a.vx, car ? Math.sin(a.face) : a.vy);
+      const dl = dk === null ? 0 : dk - heightAt(a.x, a.y);
       if (a.kind === Kind.Living && a.car === 1) {
         // Driving away: a car, facing the way it goes.
         if (nc < 900) {
           q.setFromAxisAngle(yAxis, -a.face + Math.PI / 2);
-          p.y = 0;
+          p.y = (0) + dl;
           m.compose(p, q, sc.set(VEHICLE_SCALE, VEHICLE_SCALE, VEHICLE_SCALE));
           cc.setHex(CAR_COLOURS[Math.floor(hash(a.uid * 977) * CAR_COLOURS.length)]);
           putCar(a.uid, m, this.thermal ? THERM.warm : cc);
@@ -992,11 +1066,11 @@ export class CityLayer {
       }
       if (rigR > 0 && !rig.full && Math.hypot((a.x - look.x) * CELL_X, (a.y - look.y) * CELL_Y) < rigR) {
         if (ns < 2600 && a.kind !== Kind.Fallen) {
-          sp.set(p.x + 0.4, 0.03, p.z + 0.4);
+          sp.set(p.x + 0.4, 0.03 + dl, p.z + 0.4);
           m.compose(sp, q0, one.set(FIG * 0.8, 1, FIG * 0.8));
           SH.setMatrixAt(ns++, m);
         }
-        p.y = 0;
+        p.y = (0) + dl;
         const th = this.thermal ? (a.kind === Kind.Living ? THERM.warm : a.kind === Kind.Dead ? THERM.cold : THERM.cool) : null;
         rig.add(a, p, -a.face + Math.PI / 2, FIG, time, th);
         continue;
@@ -1007,29 +1081,29 @@ export class CityLayer {
       if (lying) {
         q.setFromAxisAngle(yAxis, a.face);
         q.multiply(new THREE.Quaternion().setFromAxisAngle(xAxis, Math.PI / 2));
-        p.y = 0.25;
+        p.y = (0.25) + dl;
         c = a.kind === Kind.Fallen ? COL.fallen : a.kind === Kind.Living ? (a.turn >= 0 ? COL.sick : COL.living) : a.hold ? COL.dead : COL.downed;
       } else {
         // Face where they are going (sim angles: x east, y south, same as our x and z).
         q.setFromAxisAngle(yAxis, -a.face + Math.PI / 2);
         const moving = Math.hypot(a.vx, a.vy) > 0.0001;
-        p.y = moving ? Math.abs(Math.sin(time * 14 + k)) * 0.12 : 0;
+        p.y = (moving ? Math.abs(Math.sin(time * 14 + k)) * 0.12 : 0) + dl;
         // Walkers alternate between the two stride poses; the dead run faster and wilder.
         flip = moving && Math.floor(time * (a.kind === Kind.Dead ? 9 : 6) + hash(k) * 2) % 2 === 1;
         if (ns < 2600) {
-          sp.set(p.x + 0.5, 0.03, p.z + 0.5);
+          sp.set(p.x + 0.5, 0.03 + dl, p.z + 0.5);
           m.compose(sp, q0, one.set(FIG * 0.9, 1, FIG * 0.9));
           SH.setMatrixAt(ns++, m);
         }
         if (a.kind === Kind.Dead && a.lunge > 0) {
           // Leaping: thrown forward.
           q.multiply(new THREE.Quaternion().setFromAxisAngle(xAxis, 0.8));
-          p.y = 0.4;
+          p.y = (0.4) + dl;
           flip = true;
         } else if (a.kind === Kind.Dead && a.crawl) {
           // Crawling: low to the ground, dragging itself.
           q.multiply(new THREE.Quaternion().setFromAxisAngle(xAxis, 1.25));
-          p.y = 0.2;
+          p.y = (0.2) + dl;
           flip = false;
         }
         if (a.kind === Kind.Dead) c = COL.dead;
@@ -1383,6 +1457,11 @@ const PARAPET = 0.9;
 export function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.BufferGeometry | null {
   const B: Buf = { P: [], N: [], U: [], S: [], H: [], K: [], I: [] };
   const { P, N, U, S, H, I } = B;
+  const L: number[] = []; // lift per vertex: each building's lowest ground
+  let lift = 0;
+  const fillLift = () => {
+    while (L.length < P.length / 3) L.push(lift);
+  };
   const v = new THREE.Vector3();
   const rp = { x: 0, y: 0, tx: 1, ty: 0 };
   for (const k of query(s, x0, y0, x0 + TILE, y0 + TILE)) {
@@ -1408,6 +1487,9 @@ export function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.Buffe
       area += a.x * b.y - b.x * a.y;
     }
     const sign = area > 0 ? 1 : -1;
+    fillLift();
+    lift = Infinity;
+    for (let j = 0; j < n; j++) lift = Math.min(lift, heightAt(xs(j), ys(j)));
     const house = fitHouse(ring, h);
     const wallKind = house ? HK.house : HK.wall;
     let u = 0;
@@ -1504,6 +1586,7 @@ export function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.Buffe
     }
   }
   if (!P.length) return null;
+  fillLift();
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
   g.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
@@ -1511,6 +1594,7 @@ export function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.Buffe
   g.setAttribute('aSeed', new THREE.Float32BufferAttribute(S, 1));
   g.setAttribute('aH', new THREE.Float32BufferAttribute(H, 1));
   g.setAttribute('aK', new THREE.Float32BufferAttribute(B.K, 1));
+  g.setAttribute('aLift', new THREE.Float32BufferAttribute(L, 1));
   g.setIndex(I);
   g.computeBoundingSphere();
   return g;
@@ -1594,7 +1678,8 @@ function drawStreetGround(g: CanvasRenderingContext2D, x0: number, y0: number, w
   for (const k of water) if (det.water.meta[k]) (path(g, det.water, k, x0, y0, ppc), g.fill());
   // 2. Streets, in layers so crossings join cleanly: sidewalk, boulevard grass, kerb, asphalt.
   const R = det.roads;
-  const roads = query(R, x0 - 0.3, y0 - 0.3, x1 + 0.3, y1 + 0.3).sort((a, b) => R.meta[a] - R.meta[b]);
+  // Bridges are built as decks, not painted on the ground (it would run down into the river).
+  const roads = query(R, x0 - 0.3, y0 - 0.3, x1 + 0.3, y1 + 0.3).filter((k) => !det.bridgeRoads.has(k)).sort((a, b) => R.meta[a] - R.meta[b]);
   const freeway = (wm: number) => wm === 22 || wm === 18 || wm === 9; // motorways, trunks, ramps
   const boulevard = (k: number) => {
     const wm = R.meta[k];

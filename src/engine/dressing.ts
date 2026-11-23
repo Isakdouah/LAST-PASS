@@ -56,7 +56,7 @@ export function dressingSpots(x0: number, y0: number): Dress[] {
   const inTile = (x: number, y: number) => x >= x0 && y >= y0 && x < x0 + TILE && y < y0 + TILE && !blocked(x, y) && !nearOtherRoad(-1, x, y, 0.4);
   for (const k of query(s, x0 - 0.3, y0 - 0.3, x0 + TILE + 0.3, y0 + TILE + 0.3)) {
     const wm = s.meta[k];
-    if (wm > 11) continue; // big streets: signals, not stop signs (not drawn yet)
+    if (wm > 11 || det.bridgeRoads.has(k)) continue; // big streets: signals, not stop signs (not drawn yet)
     const o = s.off[k], n = s.off[k + 1] - o;
     const poleSide = hash(k * 5 + 1) < 0.5 ? 1 : -1;
     const poles = wm <= 8 && hash(k * 7 + 3) < 0.7;

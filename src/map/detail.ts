@@ -12,6 +12,8 @@ export interface DetailFile {
   q: number;
   buildings: ShapeFile;
   roads: ShapeFile;
+  bridges?: ShapeFile;
+  bridgeRoads?: number[];
   water: ShapeFile;
   parks: ShapeFile;
   names: Record<string, string>;
@@ -112,6 +114,10 @@ export interface Detail {
   roads: Shapes; // meta = width in metres
   water: Shapes; // meta 1 = hole (island)
   parks: Shapes;
+  /** Bridge decks (roads, paths, railways); meta = deck width in metres. */
+  bridges: Shapes;
+  /** Road pieces that are bridges: not painted on the ground (the deck is built instead). */
+  bridgeRoads: Set<number>;
   names: Map<number, string>;
 }
 
@@ -123,6 +129,8 @@ export function loadDetail(f: DetailFile): Detail {
     roads: decodeShapes(f.roads, f.q),
     water: decodeShapes(f.water, f.q),
     parks: decodeShapes(f.parks, f.q),
+    bridges: f.bridges ? decodeShapes(f.bridges, f.q) : decodeShapes({ count: 0, starts: '', lens: '', steps: '', meta: '' } as ShapeFile, f.q),
+    bridgeRoads: new Set(f.bridgeRoads ?? []),
     names,
   };
 }

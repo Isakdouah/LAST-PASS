@@ -4,6 +4,7 @@
 // what is happening on the ground; the thermal camera sees through leaves.
 import * as THREE from 'three';
 import { LIGHT_PARS } from './lightfield';
+import { TERRAIN_PARS } from './terrain';
 import { hash, Lamp, Tree, TreeKind } from './props';
 
 const V = 1.1; // block size in metres for crowns
@@ -133,6 +134,7 @@ export function lampGeometry(): THREE.BufferGeometry {
 const PROP_V = /* glsl */ `#include <common>
 #include <logdepthbuf_pars_vertex>
 attribute float aCanopy; attribute float aGlow; attribute float aFade; attribute float aWarm;
+${TERRAIN_PARS}
 varying vec3 vC; varying float vFade; varying float vWarm; varying float vGlow; varying vec3 vW; varying float vY; varying float vCan;
 void main() {
   vec3 c = color;
@@ -141,6 +143,7 @@ void main() {
   #endif
   vC = c; vFade = aFade * aCanopy; vCan = aCanopy; vWarm = aWarm; vGlow = aGlow; vY = position.y;
   vec4 w = modelMatrix * instanceMatrix * vec4(position, 1.0); vW = w.xyz;
+  w.y += terrH((modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xz);
   gl_Position = projectionMatrix * viewMatrix * w;
   #include <logdepthbuf_vertex>
 }`;
