@@ -68,8 +68,25 @@ These are the rules the close-up city follows now. Each one has a check behind i
    street surface. Simplification: Minneapolis runs most power lines down alleys; our map has no alleys.
 7. **Solid things:** buildings (to 1.25 m), parked cars (to the exact body) stop people and bullets.
 
+## Real ground (draft 11, 23 Nov 2026)
+
+1. **Heights:** USGS 3DEP bare-earth heights (via AWS Terrain Tiles, `tools/build_terrain.py`), about 40 m
+   apart, 0.6 m steps. City runs 207 to 339 m above sea level; the river sits about 20 m below downtown.
+   Everything is placed flat and lifted in the shaders; each building gets one lift (its lowest corner) and
+   its walls sink 4 m so no gap shows on slopes.
+2. **Hill shading:** slopes lit from the north-west in 8 steps, so bluffs read at night.
+3. **Bridges:** bare-earth data has no bridges, so we build them from every OpenStreetMap `bridge=*` way
+   (3,060): deck, railings, lane paint, piers every 32 m where the deck is over 3 m up. People and cars
+   ride the deck when heading along it (`bridges.ts`, tested).
+4. **Water:** lamps reflect as long streaks toward the viewer; nothing stands in the water.
+5. **Globe:** world relief (z3 tiles, about 20 km per pixel) shades mountains, rock above the tree line,
+   snow by height and latitude.
+
 ## Known gaps (next)
 
 - Trees are blocky clusters; Ebbtide's read as softer silhouettes.
 - No fences, porches are walk-through, no apartment balconies or fire escapes yet.
 - Wires are thinner than a pixel from high up, so they come and go at the 400 m view.
+- Globe relief is soft up close (20 km pixels); downtown towers look short (OSM heights missing?).
+- Freeway overpasses: a person standing still under one may be drawn on top of it.
+- Heights are 40 m apart: small things like levees and rail cuts are smoothed out.
