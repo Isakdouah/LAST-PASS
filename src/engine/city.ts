@@ -10,6 +10,7 @@ import { buildLamps, buildTrees, propMaterial, TileTrees } from './propMeshes';
 import { nearestRoad, pointAt } from '../sim/roadnet';
 import { CAR_COLOURS, CAR_STYLES, carLightsGeometry, SIZE, VEHICLE_SCALE, vehicleGeometry, VKind } from './vehicles';
 import { HEROES } from '../game/heroes';
+import { dressingGeometry, dressingSpots } from './dressing';
 import { Rig } from './rig';
 import { LightField, LIGHT_PARS, litBasic, MovingLight } from './lightfield';
 import { addHouse, box as hbox, Buf, fitHouse, K as HK } from './houses';
@@ -356,8 +357,8 @@ const carCache = new Map<string, THREE.BufferGeometry>();
 /** Parked cars for a tile, merged into one mesh with their shadows. */
 function parkedCars(x0: number, y0: number): THREE.BufferGeometry | null {
   const spots = parkedCarSpots(x0, y0);
-  if (!spots.length) return null;
-  const list: THREE.BufferGeometry[] = [];
+  const list: THREE.BufferGeometry[] = dressingGeometry(dressingSpots(x0, y0), (x, y, o) => cellToLocal(x, y, o));
+  if (!spots.length && !list.length) return null;
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3(VEHICLE_SCALE, VEHICLE_SCALE, VEHICLE_SCALE);
   const y = new THREE.Vector3(0, 1, 0), one = new THREE.Vector3(1, 1, 1);
   const shadow = new THREE.PlaneGeometry(SIZE.car.w * VEHICLE_SCALE * 1.15, SIZE.car.l * VEHICLE_SCALE * 1.05);

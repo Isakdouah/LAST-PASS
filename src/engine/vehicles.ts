@@ -17,7 +17,7 @@ export type VKind = 'car' | 'pickup' | 'bus' | 'ambulance';
 
 const glass = 0x10141c;
 /** Box with simple top light baked into vertex colours (top bright, sides darker, bottom dark). */
-function box(w: number, h: number, l: number, x: number, y: number, z: number, col: number): THREE.BufferGeometry {
+export function box(w: number, h: number, l: number, x: number, y: number, z: number, col: number): THREE.BufferGeometry {
   const g = new THREE.BoxGeometry(w, h, l);
   g.translate(x, y, z);
   const n = g.attributes.normal as THREE.BufferAttribute;
