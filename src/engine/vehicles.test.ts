@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { SIZE, vehicleGeometry, VKind } from './vehicles';
-import { parkedCarSpots } from './city';
+import { parkedAt, parkedCarSpots } from './city';
 import { blocked, GH, GW } from '../game/session';
 import { TILE } from '../map/detail';
 
@@ -39,5 +39,17 @@ describe('nothing inside anything', () => {
       }
     }
     expect(n).toBeGreaterThan(20);
+  });
+
+  it('parked cars are solid: you cannot stand in one, but you can stand on the pavement beside it', () => {
+    const x0 = Math.floor(96 / TILE) * TILE, y0 = Math.floor(152 / TILE) * TILE;
+    const spots = parkedCarSpots(x0, y0);
+    expect(spots.length).toBeGreaterThan(3);
+    for (const c of spots.slice(0, 10)) {
+      expect(parkedAt(c.x, c.y)).toBe(true);
+      // 2.5 m to the side (across the car) is outside its body.
+      const ax = Math.cos(c.angle), ay = -Math.sin(c.angle); // across, in metres
+      expect(parkedAt(c.x + (ax * 2.5) / 79, c.y + (ay * 2.5) / 79)).toBe(false);
+    }
   });
 });

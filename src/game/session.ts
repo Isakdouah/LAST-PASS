@@ -119,6 +119,10 @@ export function insideBuilding(x: number, y: number): boolean {
   }
   return false;
 }
+/** Solid things the renderer places by rule (parked cars). Set by the city layer; the
+ *  street simulation treats them like walls. */
+let solidProps: (x: number, y: number) => boolean = () => false;
+export const setSolidProps = (f: (x: number, y: number) => boolean) => void (solidProps = f);
 const fine = new Map<number, Uint8Array>();
 export const blocked = (x: number, y: number) => {
   const X = Math.floor(x * OCC), Y = Math.floor(y * OCC);
@@ -720,7 +724,7 @@ export class Session {
     const mx = Math.ceil(vw * 0.3) + 1, my = Math.ceil(vh * 0.3) + 1;
     const x0 = Math.max(0, Math.floor(box.x0) - mx), y0 = Math.max(0, Math.floor(box.y0) - my);
     const x1 = Math.min(GW, Math.ceil(box.x1) + mx), y1 = Math.min(GH, Math.ceil(box.y1) + my);
-    this.street = enterStreet(this.world, x0, y0, x1 - x0, y1 - y0, MAX_AGENTS, this.tick + 1, policeCells, (x, y) => blocked(x, y) || wet(x, y), this.env());
+    this.street = enterStreet(this.world, x0, y0, x1 - x0, y1 - y0, MAX_AGENTS, this.tick + 1, policeCells, (x, y) => blocked(x, y) || wet(x, y) || solidProps(x, y), this.env());
     const w = this.world;
     for (let y = y0; y < y1; y++)
       for (let x = x0; x < x1; x++) {

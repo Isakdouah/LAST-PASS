@@ -242,7 +242,7 @@ export class Rig {
   private v = new THREE.Vector3();
   private s = new THREE.Vector3();
   /** Step phase per person, moved on by the distance walked (so feet do not slide). */
-  private gait = new Map<number, { x: number; z: number; ph: number; t: number }>();
+  private gait = new Map<number, { x: number; z: number; ph: number; t: number; yaw: number }>();
 
   constructor(scene: THREE.Scene, shared: Record<string, THREE.IUniform>) {
     // Transparent pass like the other figures: the ground is drawn there first, without depth.
@@ -288,7 +288,7 @@ export class Rig {
     if (a.kind === Kind.Fallen) return undefined;
     let g = this.gait.get(a.uid);
     if (!g || t - g.t > 0.5) {
-      g = { x: pos.x, z: pos.z, ph: h(a.uid) * 6.28, t };
+      g = { x: pos.x, z: pos.z, ph: h(a.uid) * 6.28, t, yaw: NaN };
       this.gait.set(a.uid, g);
     }
     const d = Math.hypot(pos.x - g.x, pos.z - g.z);
@@ -302,11 +302,24 @@ export class Rig {
     return g.ph;
   }
 
+  /** Turn smoothly toward the facing the simulation gives (at most about 1.5 turns a second). */
+  private turn(a: Agent, want: number, t: number, dt: number): number {
+    const g = this.gait.get(a.uid);
+    if (!g) return want;
+    if (Number.isNaN(g.yaw) || dt <= 0) return (g.yaw = want);
+    const d = Math.atan2(Math.sin(want - g.yaw), Math.cos(want - g.yaw));
+    const max = 9 * dt;
+    g.yaw += Math.max(-max, Math.min(max, d));
+    return g.yaw;
+  }
+
   /** Add one person at local position `pos` (metres, ground y = 0). */
   add(a: Agent, pos: THREE.Vector3, yaw: number, fig: number, t: number, thermal: THREE.Color | null) {
     if (this.n >= MAX) return;
     const moving = Math.hypot(a.vx, a.vy) > 1e-5;
+    const last = this.gait.get(a.uid)?.t ?? t;
     const ph = this.phase(a, pos, fig, t);
+    yaw = this.turn(a, yaw, t, Math.min(0.1, t - last));
     const p = poseOf(a, t, moving ? ph : undefined);
     const dead = a.kind === Kind.Dead;
     const u = a.uid;

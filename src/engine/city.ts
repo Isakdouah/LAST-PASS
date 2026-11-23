@@ -4,7 +4,7 @@
 // Close up: sharper ground tiles and real extruded buildings near the camera only,
 // the simulated people as little figures, bullets as tracers, blood, fire and smoke.
 import * as THREE from 'three';
-import { det, GW, GH, CELL_X, CELL_Y, Session, places, blocked, roadNet } from '../game/session';
+import { det, GW, GH, CELL_X, CELL_Y, Session, places, blocked, roadNet, setSolidProps } from '../game/session';
 import { lampSpots, paved, treeSpots } from './props';
 import { buildLamps, buildTrees, propMaterial, TileTrees } from './propMeshes';
 import { nearestRoad, pointAt } from '../sim/roadnet';
@@ -313,6 +313,38 @@ export function parkedCarSpots(x0: number, y0: number): CarSpot[] {
   }
   return out;
 }
+
+// Parked cars are solid to people and bullets: a 10 m bucket map of their footprints, filled
+// one map tile (and its neighbours) at a time on first use.
+const parkedDone = new Set<number>();
+const parkedB = new Map<number, { x: number; y: number; ux: number; uy: number; hl: number; hw: number }[]>();
+const PB = 8; // buckets per cell (about 10 m)
+export function parkedAt(x: number, y: number): boolean {
+  const tx = Math.floor(x / TILE), ty = Math.floor(y / TILE);
+  for (let j = -1; j <= 1; j++)
+    for (let i = -1; i <= 1; i++) {
+      const key = (ty + j) * 10000 + tx + i;
+      if (parkedDone.has(key)) continue;
+      parkedDone.add(key);
+      for (const c of parkedCarSpots((tx + i) * TILE, (ty + j) * TILE)) {
+        const sp = { x: c.x, y: c.y, ux: Math.sin(c.angle), uy: Math.cos(c.angle), hl: (SIZE[c.kind].l * VEHICLE_SCALE) / 2, hw: (SIZE[c.kind].w * VEHICLE_SCALE) / 2 };
+        const r = (sp.hl + 0.5) / CELL_X;
+        for (let by = Math.floor((c.y - r) * PB); by <= Math.floor((c.y + r) * PB); by++)
+          for (let bx = Math.floor((c.x - r) * PB); bx <= Math.floor((c.x + r) * PB); bx++) {
+            const k = by * 100000 + bx;
+            (parkedB.get(k) ?? parkedB.set(k, []).get(k)!).push(sp);
+          }
+      }
+    }
+  const list = parkedB.get(Math.floor(y * PB) * 100000 + Math.floor(x * PB));
+  if (!list) return false;
+  for (const c of list) {
+    const dx = (x - c.x) * CELL_X, dy = (y - c.y) * CELL_Y;
+    if (Math.abs(dx * c.ux + dy * c.uy) < c.hl && Math.abs(-dx * c.uy + dy * c.ux) < c.hw) return true;
+  }
+  return false;
+}
+setSolidProps(parkedAt);
 
 const carCache = new Map<string, THREE.BufferGeometry>();
 /** Parked cars for a tile, merged into one mesh with their shadows. */

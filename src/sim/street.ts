@@ -1323,7 +1323,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       a.y = my;
       a.vx = vx;
       a.vy = vy;
-      if (a.kind === Kind.Living && speed > SPEED.walk) a.face = Math.atan2(vy, vx);
+      if (a.car !== 1 && Math.hypot(mx - a.px, my - a.py) > 1e-6) a.face = Math.atan2(vy, vx); // walkers face where they go
     } else {
       a.vx = (r() - 0.5) * step;
       a.vy = (r() - 0.5) * step;
