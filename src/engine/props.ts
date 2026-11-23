@@ -89,6 +89,23 @@ export interface Lamp {
 
 /** Street lamps along every road about every 40 m, at the kerb, alternating sides.
  *  The orange light pools on the ground are drawn at the same spots. */
+/** Is (x, y) within `margin` metres of the surface of any street other than `k`? */
+export function nearOtherRoad(k: number, x: number, y: number, margin: number): boolean {
+  const s = det.roads;
+  for (const q of query(s, x - 0.4, y - 0.4, x + 0.4, y + 0.4)) {
+    if (q === k) continue;
+    const qo = s.off[q], qn = s.off[q + 1] - qo, clearM = s.meta[q] / 2 + margin;
+    for (let i = 0; i + 1 < qn; i++) {
+      const px = s.xy[(qo + i) * 2], py = s.xy[(qo + i) * 2 + 1];
+      const ex = (s.xy[(qo + i + 1) * 2] - px) * CELL_X, ey = (s.xy[(qo + i + 1) * 2 + 1] - py) * CELL_Y;
+      const wx = (x - px) * CELL_X, wy = (y - py) * CELL_Y;
+      const t = Math.max(0, Math.min(1, (wx * ex + wy * ey) / (ex * ex + ey * ey || 1)));
+      if (Math.hypot(wx - ex * t, wy - ey * t) < clearM) return true;
+    }
+  }
+  return false;
+}
+
 export function lampSpots(x0: number, y0: number, x1 = x0 + TILE, y1 = y0 + TILE): Lamp[] {
   const s = det.roads;
   const out: Lamp[] = [];
@@ -107,7 +124,7 @@ export function lampSpots(x0: number, y0: number, x1 = x0 + TILE, y1 = y0 + TILE
       while (carry < len) {
         const off = (wm / 2 + 0.8) * side;
         const x = ax + (ux * carry - uy * off) / CELL_X, y = ay + (uy * carry + ux * off) / CELL_Y;
-        if (x >= x0 && y >= y0 && x < x1 && y < y1 && !blocked(x, y)) out.push({ x, y, arm: Math.atan2(-ux * side, uy * side) });
+        if (x >= x0 && y >= y0 && x < x1 && y < y1 && !blocked(x, y) && !nearOtherRoad(k, x, y, 0.6)) out.push({ x, y, arm: Math.atan2(-ux * side, uy * side) });
         carry += 40;
         side = -side;
       }

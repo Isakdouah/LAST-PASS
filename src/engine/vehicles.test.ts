@@ -4,6 +4,7 @@ import { SIZE, vehicleGeometry, VKind } from './vehicles';
 import { parkedAt, parkedCarSpots } from './city';
 import { blocked, GH, GW } from '../game/session';
 import { TILE } from '../map/detail';
+import { lampSpots, nearOtherRoad } from './props';
 
 describe('size contract', () => {
   it('every vehicle model matches its real 2009 size (within 10 cm)', () => {
@@ -51,5 +52,17 @@ describe('nothing inside anything', () => {
       const ax = Math.cos(c.angle), ay = -Math.sin(c.angle); // across, in metres
       expect(parkedAt(c.x + (ax * 2.5) / 79, c.y + (ay * 2.5) / 79)).toBe(false);
     }
+  });
+
+  it('no lamp post stands on the surface of a street it does not belong to', () => {
+    let n = 0;
+    for (const [tx, ty] of [[96, 120], [96, 152], [72, 120]]) {
+      const x0 = Math.floor(tx / TILE) * TILE, y0 = Math.floor(ty / TILE) * TILE;
+      for (const l of lampSpots(x0, y0)) {
+        n++;
+        expect(nearOtherRoad(-1, l.x, l.y, 0.3)).toBe(false);
+      }
+    }
+    expect(n).toBeGreaterThan(20);
   });
 });

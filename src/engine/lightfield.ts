@@ -10,7 +10,15 @@ export const FIELD = 512; // metres across
 const N = 256; // squares across
 
 export const LIGHT_PARS = /* glsl */ `
-uniform sampler2D lampTex; uniform sampler2D dynTex; uniform vec4 lightBox;
+uniform sampler2D lampTex; uniform sampler2D dynTex; uniform vec4 lightBox; uniform vec3 hazeR;
+/** Night haze: what is further than where you look fades into smoky, sodium-lit air.
+ *  hazeR = (start metres, span metres, strength). Stepped, like the light. */
+vec3 haze(vec3 col, vec3 w) {
+  if (hazeR.z <= 0.0) return col;
+  float f = clamp((length(w - cameraPosition) - hazeR.x) / hazeR.y, 0.0, 1.0);
+  f = floor(f * 6.0 + 0.5) / 6.0;
+  return mix(col, vec3(0.115, 0.095, 0.085), f * hazeR.z);
+}
 /** Light at a world point: sodium lamps (cut by power loss) and white moving lights. */
 vec3 fieldLight(vec3 w, float dark) {
   vec2 uv = (w.xz - lightBox.xy) / lightBox.zw;
@@ -49,6 +57,8 @@ export class LightField {
   readonly dynTex: THREE.CanvasTexture;
   /** x0, z0 of the field and its size (local metres). */
   readonly box = new THREE.Vector4(1e9, 1e9, FIELD, FIELD);
+  /** Haze start, span (metres from the camera) and strength; strength 0 = off. */
+  readonly hazeR = new THREE.Vector3(0, 1, 0);
   private key = '';
 
   constructor() {
@@ -66,7 +76,7 @@ export class LightField {
   }
 
   uniforms(): Record<string, THREE.IUniform> {
-    return { lampTex: { value: this.lampTex }, dynTex: { value: this.dynTex }, lightBox: { value: this.box } };
+    return { lampTex: { value: this.lampTex }, dynTex: { value: this.dynTex }, lightBox: { value: this.box }, hazeR: { value: this.hazeR } };
   }
 
   /** Centre the field near (cx, cz); lamps are only redrawn when it moves a step. */
@@ -159,7 +169,7 @@ ${LIGHT_PARS}`,
     float dark = smoothstep(0.2, 0.8, os.a);
     float k = inField(vLW);
     vec3 L = vec3(litAmbient) + fieldLight(vLW, dark) + vec3(1.0, 0.4, 0.1) * os.r * os.r * 1.2;
-    if (thermal < 0.5) outgoingLight *= mix(vec3(1.0), L, k);
+    if (thermal < 0.5) outgoingLight = haze(outgoingLight * mix(vec3(1.0), L, k), vLW);
   }
   #include <opaque_fragment>`,
       );

@@ -173,6 +173,7 @@ void main() {
   vec3 col = vC * light;
   if (vGlow > 0.5) col = mix(vec3(1.0, 0.78, 0.42), vec3(0.08, 0.08, 0.09), dark);
   if (thermal > 0.5) col = vec3(0.1, 0.1, 0.12) + vec3(0.1) * vGlow * (1.0 - dark);
+  if (thermal < 0.5 && vGlow < 0.5) col = haze(col, vW);
   gl_FragColor = vec4(col, alpha);
 }`;
 

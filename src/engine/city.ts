@@ -5,7 +5,7 @@
 // the simulated people as little figures, bullets as tracers, blood, fire and smoke.
 import * as THREE from 'three';
 import { det, GW, GH, CELL_X, CELL_Y, Session, places, blocked, roadNet, setSolidProps } from '../game/session';
-import { lampSpots, paved, treeSpots } from './props';
+import { lampSpots, nearOtherRoad, paved, treeSpots } from './props';
 import { buildLamps, buildTrees, propMaterial, TileTrees } from './propMeshes';
 import { nearestRoad, pointAt } from '../sim/roadnet';
 import { CAR_COLOURS, SIZE, VEHICLE_SCALE, vehicleGeometry, VKind } from './vehicles';
@@ -92,6 +92,7 @@ void main() {
   // Fade out at the map edge so the city melts into the globe.
   float e = min(min(cp.x, grid.x - cp.x), min(cp.y, grid.y - cp.y));
   float fade = mix(1.0, smoothstep(0.0, 14.0, e), edgeFade);
+  if (thermal < 0.5) col = haze(col, vW);
   gl_FragColor = vec4(col, alpha * fade);
 }`;
 
@@ -215,6 +216,7 @@ void main() {
   }
   col += vec3(0.9, 0.3, 0.05) * glow * flick * (roof ? 0.4 : 0.5) * exp(-vW.y / 30.0);
   if (thermal > 0.5) col = vec3(0.08 + 0.05 * float(roof)) + vec3(0.6) * fire;
+  if (thermal < 0.5) col = haze(col, vW);
   gl_FragColor = vec4(col, 1.0);
 }`;
 
@@ -306,6 +308,8 @@ export function parkedCarSpots(x0: number, y0: number): CarSpot[] {
           for (const [a, b] of [[hl, hw], [hl, -hw], [-hl, hw], [-hl, -hw], [0, 0]])
             if (blocked(cx + (ux * a - uy * b) / CELL_X, cy + (uy * a + ux * b) / CELL_Y)) clear = false;
           if (!clear) continue;
+          // Not in a junction or on a crosswalk: keep clear of every other street.
+          if (nearOtherRoad(k, cx, cy, 8.5)) continue;
           out.push({ x: cx, y: cy, angle: Math.atan2(ux, uy) + (h < 0.16 ? Math.PI : 0), kind, colour: CAR_COLOURS[Math.floor(hash(k * 3 + j * 11 + d) * CAR_COLOURS.length)] });
         }
       }
@@ -425,6 +429,9 @@ export class CityLayer {
   /** Trees and lamps (1 = all; the auto quality may lower it). */
   treeDensity = 1;
   private tiles = new Map<number, Tile>();
+  /** Sharper ground (about 3 px a metre) in a 3 x 3 cell patch round where we look, up close. */
+  private nearGround: THREE.Mesh | null = null;
+  private nearKey = '';
   private frameNo = 0;
   private agents: THREE.InstancedMesh;
   private rig: Rig | null = null;
@@ -715,6 +722,13 @@ export class CityLayer {
         this.light.moving(list);
       }
     }
+    // Haze beyond where we look (only near the ground; from high up the city stays clear).
+    {
+      const lv = cellToLocal(look.x, look.y, new THREE.Vector3());
+      const D = camLocal.distanceTo(lv);
+      this.light.hazeR.set(D * 1.05, D * 3.5, THREE.MathUtils.clamp((3 - d) / 2, 0, 1) * 0.6);
+    }
+    this.updateNearGround(look, d, dots);
     this.streetAlpha = s.streetAlpha;
     this.updateStreet(s.street, time, look, d);
     this.updateCanopy(s);
@@ -807,6 +821,39 @@ export class CityLayer {
       this.selBox.quaternion.identity();
       (this.selBox.material as THREE.LineBasicMaterial).opacity = 0.65 + 0.35 * Math.sin(time * 4);
     }
+  }
+
+  private updateNearGround(look: { x: number; y: number }, d: number, dots: number) {
+    const on = d < 0.6;
+    if (this.nearGround) this.nearGround.visible = on;
+    if (!on) return;
+    const NC = 3, PPC = 256;
+    const x0 = Math.floor(look.x) - 1, y0 = Math.floor(look.y) - 1;
+    const key = x0 + ',' + y0;
+    if (!this.nearGround) {
+      const c = document.createElement('canvas');
+      c.width = c.height = NC * PPC;
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.NoColorSpace;
+      tex.magFilter = THREE.NearestFilter;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.anisotropy = 4;
+      const g = new THREE.PlaneGeometry(NC * CELL_X, NC * CELL_Y);
+      g.rotateX(-Math.PI / 2);
+      this.nearGround = new THREE.Mesh(g, this.groundMat(tex, 1));
+      this.nearGround.renderOrder = -8;
+      this.scene.add(this.nearGround);
+    }
+    const mat = this.nearGround.material as THREE.ShaderMaterial;
+    mat.uniforms.dots.value = dots;
+    mat.uniforms.alpha.value = this.alpha;
+    if (key === this.nearKey) return;
+    this.nearKey = key;
+    const tex = mat.uniforms.map.value as THREE.CanvasTexture;
+    const c = tex.image as HTMLCanvasElement;
+    drawGround(c.getContext('2d')!, x0, y0, NC, NC, PPC);
+    tex.needsUpdate = true;
+    cellToLocal(x0 + NC / 2, y0 + NC / 2, this.nearGround.position);
   }
 
   private buildTile(key: number): Tile {
@@ -1506,7 +1553,7 @@ function drawStreetGround(g: CanvasRenderingContext2D, x0: number, y0: number, w
       g.fillRect((cx - x0) * ppc, (cy - y0) * ppc, ppc + 1, ppc + 1);
     }
   // Grain: grass tufts and stains, in 2 px blocks so it stays pixel art.
-  for (let k = 0; k < w * h * 90; k++) {
+  for (let k = 0, nk = w * h * 90 * Math.max(1, (ppc / 80) ** 2); k < nk; k++) {
     const px = Math.floor(hash(k * 3 + x0) * W), py = Math.floor(hash(k * 5 + y0) * H);
     const pv = paved(x0 + px / ppc, y0 + py / ppc);
     const v = hash(k * 7 + x0 * 131 + y0 * 977);
