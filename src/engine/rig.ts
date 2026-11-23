@@ -4,6 +4,7 @@
 // simple one-piece figures. The pose only shows what the simulation decided.
 import * as THREE from 'three';
 import { Agent, Kind, Role } from '../sim/street';
+import { litBasic } from './lightfield';
 
 const RISE = 1.2; // keep in step with street.ts
 
@@ -186,9 +187,9 @@ export class Rig {
   private v = new THREE.Vector3();
   private s = new THREE.Vector3();
 
-  constructor(scene: THREE.Scene) {
+  constructor(scene: THREE.Scene, shared: Record<string, THREE.IUniform>) {
     // Transparent pass like the other figures: the ground is drawn there first, without depth.
-    const mat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true });
+    const mat = litBasic(new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), shared, 0.75);
     const geos = [
       partGeo(true, 0.4, TORSO, 0.24), // 0 torso
       partGeo(true, HEAD * 0.85, HEAD, HEAD * 0.9), // 1 head

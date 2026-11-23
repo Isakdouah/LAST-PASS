@@ -58,6 +58,9 @@ export const WEAPONS = [
 export interface Agent {
   x: number;
   y: number;
+  /** Where they were at the start of the last step (the picture slides between). */
+  px: number;
+  py: number;
   vx: number;
   vy: number;
   kind: Kind;
@@ -262,6 +265,8 @@ export function newAgent(x: number, y: number, kind: Kind, ammo = 0, role = Role
   return {
     x,
     y,
+    px: x,
+    py: y,
     vx: 0,
     vy: 0,
     kind,
@@ -348,12 +353,25 @@ export function newStreet(x0: number, y0: number, w: number, h: number, scale = 
 
 function spot(x: number, y: number, r: () => number, blocked: Blocked, centre = false): [number, number] {
   let ax = 0, ay = 0;
-  for (let tries = 0; tries < 8; tries++) {
+  for (let tries = 0; tries < 12; tries++) {
     ax = centre ? x + 0.5 + (r() - 0.5) * 0.5 : x + r();
     ay = centre ? y + 0.5 + (r() - 0.5) * 0.5 : y + r();
-    if (!blocked(ax, ay)) break;
+    if (!blocked(ax, ay)) return [ax, ay];
   }
-  return [ax, ay];
+  return outside(ax, ay, blocked);
+}
+
+/** The nearest spot not inside a building (rings of about 4 m, out to 120 m). */
+export function outside(x: number, y: number, blocked: Blocked): [number, number] {
+  if (!blocked(x, y)) return [x, y];
+  const st = 0.05;
+  for (let ring = 1; ring <= 30; ring++)
+    for (let k = -ring; k <= ring; k++)
+      for (const [dx, dy] of [[k, -ring], [k, ring], [-ring, k], [ring, k]]) {
+        const px = x + dx * st, py = y + dy * st;
+        if (!blocked(px, py)) return [px, py];
+      }
+  return [x, y];
 }
 
 /** Spawn individuals from the cell numbers of one area. `police` = cell indices of police
@@ -441,31 +459,51 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
   // Spatial buckets: half a cell each.
   const B = 2;
   const buckets = new Map<number, Agent[]>();
+  // Smaller lists for the common searches: the dead, and the living with a gun.
+  const deadB = new Map<number, Agent[]>();
+  const gunB = new Map<number, Agent[]>();
   const key = (x: number, y: number) => Math.floor(y * B) * 100000 + Math.floor(x * B);
+  const put = (m: Map<number, Agent[]>, k: number, a: Agent) => {
+    let b = m.get(k);
+    if (!b) m.set(k, (b = []));
+    b.push(a);
+  };
   for (const a of s.agents) {
+    a.px = a.x;
+    a.py = a.y;
     if (a.kind === Kind.Fallen) continue;
     const k = key(a.x, a.y);
-    let b = buckets.get(k);
-    if (!b) buckets.set(k, (b = []));
-    b.push(a);
+    put(buckets, k, a);
+    if (a.kind === Kind.Dead) put(deadB, k, a);
+    else if (a.ammo > 0 && a.car !== 1) put(gunB, k, a);
   }
+  /** Nearest agent passing `test`, searching outward ring by ring and stopping as soon as
+   *  no further ring can hold anyone closer. */
   const nearest = (a: { x: number; y: number }, test: (o: Agent) => boolean, range: number, self?: Agent): Agent | null => {
+    const m = test === isDead || test === isUp ? deadB : test === isGun ? gunB : buckets;
     let best: Agent | null = null;
     let bd = range * range;
     const R = Math.ceil(range * B);
-    for (let dy = -R; dy <= R; dy++)
-      for (let dx = -R; dx <= R; dx++) {
-        const b = buckets.get(key(a.x + dx / B, a.y + dy / B));
-        if (!b) continue;
-        for (const o of b) {
-          if (o === self || !test(o)) continue;
-          const d = (o.x - a.x) ** 2 + (o.y - a.y) ** 2;
-          if (d < bd) {
-            bd = d;
-            best = o;
-          }
+    const cx = Math.floor(a.x * B), cy = Math.floor(a.y * B);
+    for (let r = 0; r <= R; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        const edge = dy === -r || dy === r;
+        for (let dx = -r; dx <= r; dx += edge ? 1 : 2 * r) {
+          const b = m.get((cy + dy) * 100000 + cx + dx);
+          if (b)
+            for (const o of b) {
+              if (o === self || !test(o)) continue;
+              const d = (o.x - a.x) ** 2 + (o.y - a.y) ** 2;
+              if (d < bd) {
+                bd = d;
+                best = o;
+              }
+            }
+          if (r === 0) break;
         }
       }
+      if (best && bd <= (r / B) ** 2) break;
+    }
     return best;
   };
   const countNear = (a: Agent, test: (o: Agent) => boolean, range: number, cap = 6): number => {

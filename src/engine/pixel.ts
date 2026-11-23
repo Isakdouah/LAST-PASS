@@ -27,6 +27,8 @@ void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 const POST_FRAG = /* glsl */ `
 precision highp float;
 uniform sampler2D tScene;
+uniform sampler2D tDepth;
+uniform float outline;
 uniform vec2 res;
 uniform vec3 pal[${PALETTE.length}];
 uniform float usePalette;
@@ -45,6 +47,22 @@ float bayer(vec2 p) {
 void main() {
   vec2 px = floor(vUv * res);
   vec3 c = texture2D(tScene, (px + 0.5) / res).rgb;
+  if (outline > 0.5) {
+    // Outlines from depth (the depth buffer is logarithmic, so a fixed step means the same
+    // distance ratio near and far). A pixel just behind a nearer object turns dark: a
+    // one-pixel outline round everything. A pixel at the top edge of an object gets a
+    // light rim. Flat slopes do not trigger it (the neighbours balance out).
+    vec2 e = 1.0 / res;
+    vec2 uv = (px + 0.5) / res;
+    float d = texture2D(tDepth, uv).r;
+    float dl = texture2D(tDepth, uv - vec2(e.x, 0.0)).r, dr = texture2D(tDepth, uv + vec2(e.x, 0.0)).r;
+    float du = texture2D(tDepth, uv + vec2(0.0, e.y)).r, dd = texture2D(tDepth, uv - vec2(0.0, e.y)).r;
+    float near = min(min(dl, dr), min(du, dd));
+    float lap = dl + dr + du + dd - 4.0 * d;
+    float thr = 0.0016;
+    if (d - near > thr && lap < -thr) c *= 0.28;
+    else if (du - d > thr && lap > thr && d < 0.9999) c = c * 1.25 + 0.03;
+  }
   if (thermal > 0.5) {
     // Thermal camera: heat lives in the blue channel the scene writes when thermal is on.
     float l = dot(c, vec3(0.3, 0.5, 0.2));
@@ -85,11 +103,15 @@ export class Pixel {
       depthBuffer: true,
       type: THREE.UnsignedByteType,
     });
+    this.target.depthTexture = new THREE.DepthTexture(this.w, this.h);
+    this.target.depthTexture.type = THREE.UnsignedIntType;
     const mat = new THREE.ShaderMaterial({
       vertexShader: POST_VERT,
       fragmentShader: POST_FRAG,
       uniforms: {
         tScene: { value: this.target.texture },
+        tDepth: { value: this.target.depthTexture },
+        outline: { value: 1 },
         res: { value: new THREE.Vector2(this.w, this.h) },
         pal: { value: PALETTE.map((c) => new THREE.Vector3(c[0] / 255, c[1] / 255, c[2] / 255)) },
         usePalette: { value: 0 },

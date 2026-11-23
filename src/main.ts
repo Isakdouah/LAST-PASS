@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import { Sound } from './audio';
 import { fmt, inWindow, localTime, MPLS, realSeconds, subPoint, untilWindow, passIndex, passCentre, WINDOW } from './game/clock';
 import { tuned } from './game/radio';
-import { Box, GH, GW, Mode, places, Session, CELL_X, roadNet } from './game/session';
+import { Box, GH, GW, Mode, places, Session, CELL_X, roadNet, insideBuilding, wet } from './game/session';
 import { Pixel } from './engine/pixel';
 import { Globe, cityLights } from './engine/globe';
 import { CityLayer, cellToLocal, localToCell } from './engine/city';
@@ -568,7 +568,7 @@ function frame(now: number) {
     // (540, 460, then 380 pixels tall). Add ?hq to the address to switch this off.
     slowSecs = fps < 45 ? slowSecs + 1 : 0;
     // Speed meter (bottom right): frames per second and picture height. Tell Claude this number.
-    hud.fps.textContent = `${Math.round(fps)} fps · ${px.lowHeight}p · cpu ${cpuAvg.toFixed(1)} ms`;
+    hud.fps.textContent = `${Math.round(fps)} fps · ${px.lowHeight}p · cpu ${cpuAvg.toFixed(1)} ms · sim ${game.stepMs.toFixed(1)} ms`;
     hud.fps.className = fps < 45 ? 'slow' : '';
     if (slowSecs >= 3 && px.lowHeight > 380 && !location.search.includes('hq')) {
       px.setLowHeight(px.lowHeight - 80);
@@ -1034,6 +1034,42 @@ setTimeout(() => roadNet(), 800);
     setView('tele');
     blend = 1;
     tele.jumpTo(lat, lon, d);
+  },
+  /** Test bot: count what should never happen in the street right now. */
+  qa: () => {
+    const st = game.street;
+    if (!st) return null;
+    const M = CELL_X;
+    const walkers = st.agents.filter((a) => !a.gone && a.kind !== 2 && a.car !== 1);
+    let inBuilding = 0, inWater = 0, overlap = 0, inCar = 0, carOverlap = 0;
+    for (const a of walkers) {
+      if (insideBuilding(a.x, a.y)) inBuilding++;
+      if (wet(a.x, a.y)) inWater++;
+    }
+    const grid = new Map<number, typeof walkers>();
+    for (const a of walkers) {
+      const k = Math.floor(a.y * M / 2) * 100003 + Math.floor(a.x * M / 2);
+      (grid.get(k) ?? grid.set(k, []).get(k)!).push(a);
+    }
+    for (const a of walkers) {
+      const X = Math.floor(a.x * M / 2), Y = Math.floor(a.y * M / 2);
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++)
+          for (const o of grid.get((Y + dy) * 100003 + X + dx) ?? [])
+            if (o.uid > a.uid && o.hold !== a && a.hold !== o && Math.hypot(o.x - a.x, o.y - a.y) * M < 0.35) overlap++;
+    }
+    const cars = [...st.agents.filter((a) => a.car === 1 && !a.gone).map((a) => ({ x: a.x, y: a.y, f: a.face })), ...st.wrecks.map((w) => ({ x: w.x, y: w.y, f: w.face }))];
+    for (const c of cars) {
+      const fx = Math.cos(c.f), fy = Math.sin(c.f);
+      for (const a of walkers) {
+        const rx = (a.x - c.x) * M, ry = (a.y - c.y) * M;
+        if (Math.abs(rx) > 4 || Math.abs(ry) > 4) continue;
+        if (Math.abs(rx * fx + ry * fy) < 1.9 && Math.abs(-rx * fy + ry * fx) < 0.7) inCar++;
+      }
+    }
+    for (let i = 0; i < cars.length; i++)
+      for (let j = i + 1; j < cars.length; j++) if (Math.hypot(cars[i].x - cars[j].x, cars[i].y - cars[j].y) * M < 2.0) carOverlap++;
+    return { walkers: walkers.length, cars: cars.length, inBuilding, inWater, overlap, inCar, carOverlap, stepMs: +game.stepMs.toFixed(1), frameMs: +cpuAvg.toFixed(1), stats: st.stats };
   },
   /** Point the telescope at a map cell from d km. */
   lookCell: (x: number, y: number, d: number) => {

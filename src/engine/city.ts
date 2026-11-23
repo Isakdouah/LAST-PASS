@@ -11,6 +11,7 @@ import { nearestRoad, pointAt } from '../sim/roadnet';
 import { CAR_COLOURS, SIZE, VEHICLE_SCALE, vehicleGeometry, VKind } from './vehicles';
 import { HEROES } from '../game/heroes';
 import { Rig } from './rig';
+import { LightField, LIGHT_PARS, litBasic, MovingLight } from './lightfield';
 import { addHouse, box as hbox, Buf, fitHouse, K as HK } from './houses';
 import { query, Shapes, TILE } from '../map/detail';
 import { Kind, Role, Street } from '../sim/street';
@@ -46,6 +47,7 @@ uniform vec2 grid; uniform vec2 cellM; uniform float time; uniform float alpha; 
 uniform float edgeFade;
 varying vec2 vUv; varying vec3 vW;
 ${HASH}
+${LIGHT_PARS}
 void main() {
   #include <logdepthbuf_fragment>
   vec2 cp = vec2(vW.x / cellM.x + grid.x * 0.5, vW.z / cellM.y + grid.y * 0.5);
@@ -61,6 +63,14 @@ void main() {
   float f = os.r;
   float flick = 0.8 + 0.2 * sin(time * 9.0 + cp.x * 3.0) * sin(time * 6.1 + cp.y * 2.0);
   col += vec3(0.9, 0.32, 0.06) * f * f * flick * 0.6;
+  // Headlights and flashes on the ground (the lamp pools are painted in already).
+  {
+    vec2 luv = (vW.xz - lightBox.xy) / lightBox.zw;
+    if (luv.x > 0.0 && luv.y > 0.0 && luv.x < 1.0 && luv.y < 1.0) {
+      float dyn = floor(texture2D(dynTex, luv).r * 4.0 + 0.35) / 4.0;
+      col += vec3(1.0, 0.95, 0.82) * dyn * (0.12 + col * 2.5);
+    }
+  }
   // The crowd as dots (where people are not simulated one by one).
   if (dots > 0.01) {
     vec2 sp = cp * 7.0;
@@ -99,22 +109,26 @@ const BLD_F = /* glsl */ `${LOG_F}
 uniform sampler2D over; uniform sampler2D overS; uniform vec2 grid; uniform vec2 cellM; uniform float time; uniform float thermal;
 varying vec3 vW; varying vec3 vN; varying float vU; varying float vSeed; varying float vH; varying float vK;
 ${HASH}
+${LIGHT_PARS}
 void main() {
   #include <logdepthbuf_fragment>
+  // The building's number, snapped so every pixel of a wall gets exactly the same value
+  // (tiny interpolation errors, blown up by the hash, made windows sparkle).
+  float seed = floor(vSeed * 1024.0 + 0.5) / 1024.0;
   vec2 cp = vec2(vW.x / cellM.x + grid.x * 0.5, vW.z / cellM.y + grid.y * 0.5);
   vec4 o = texture2D(over, (floor(cp) + 0.5) / grid);
   vec4 os = texture2D(overS, cp / grid);
   float dark = smoothstep(0.2, 0.8, os.a), fire = o.r, glow = os.r;
-  float flick = 0.7 + 0.3 * sin(time * 11.0 + vSeed * 50.0) * sin(time * 7.3 + vW.y);
+  float flick = 0.7 + 0.3 * sin(time * 11.0 + seed * 50.0) * sin(time * 7.3 + vW.y);
   // Building colours: brick, concrete, painted wood, by building.
-  float k = fract(vSeed * 7.13);
+  float k = fract(seed * 7.13);
   vec3 base = k < 0.33 ? vec3(0.42, 0.26, 0.20) : k < 0.66 ? vec3(0.46, 0.45, 0.43) : vec3(0.52, 0.47, 0.38);
-  base *= 0.75 + 0.5 * fract(vSeed * 13.7);
+  base *= 0.75 + 0.5 * fract(seed * 13.7);
   int kind = int(vK + 0.5);
   bool house = kind == 6;
   if (house || kind == 1 || kind == 2 || kind == 4) {
     // Houses: painted wood siding in Minneapolis colours, some brick.
-    float j = fract(vSeed * 5.31);
+    float j = fract(seed * 5.31);
     base = j < 0.18 ? vec3(0.46, 0.27, 0.20) : j < 0.34 ? vec3(0.80, 0.78, 0.72) : j < 0.46 ? vec3(0.80, 0.72, 0.50)
       : j < 0.58 ? vec3(0.56, 0.63, 0.70) : j < 0.70 ? vec3(0.55, 0.60, 0.48) : j < 0.80 ? vec3(0.64, 0.55, 0.43)
       : j < 0.90 ? vec3(0.32, 0.40, 0.33) : vec3(0.60, 0.60, 0.58);
@@ -123,10 +137,11 @@ void main() {
   bool roof = vN.y > 0.5 && kind != 2 && kind != 3 && kind != 4 && kind != 5;
   float side = 0.55 + 0.45 * max(0.0, dot(vN, normalize(vec3(-0.6, 0.0, -0.8))));
   float street = exp(-vW.y / 9.0) * (1.0 - dark);
-  vec3 lightW = 0.30 * side + 0.8 * street * vec3(1.0, 0.68, 0.38);
+  // Lamps, headlights: the light field up close; the old height-only glow further out.
+  vec3 lightW = 0.26 * side + mix(0.8 * street * vec3(1.0, 0.68, 0.38), fieldLight(vW, dark) * 0.9, inField(vW));
   if (kind == 1) {
     // Shingles: rows every 30 cm, each a slightly different shade.
-    float j = fract(vSeed * 9.17);
+    float j = fract(seed * 9.17);
     vec3 sh = j < 0.3 ? vec3(0.30, 0.30, 0.32) : j < 0.55 ? vec3(0.36, 0.26, 0.20) : j < 0.8 ? vec3(0.27, 0.32, 0.28) : vec3(0.20, 0.20, 0.22);
     float row = floor(vW.y / 0.3);
     float tab = h21(vec2(row, floor((vW.x + vW.z) / 0.9 + row * 0.5)));
@@ -137,14 +152,18 @@ void main() {
   } else if (kind == 3) {
     col = vec3(0.40, 0.22, 0.17) * (0.8 + 0.2 * step(0.15, fract(vW.y / 0.25))) * (vN.y < -0.5 ? 0.25 : 1.0) * lightW;
   } else if (kind == 4) {
-    float j = fract(vSeed * 3.7);
+    float j = fract(seed * 3.7);
     col = (j < 0.3 ? vec3(0.45, 0.12, 0.10) : j < 0.55 ? vec3(0.12, 0.22, 0.16) : j < 0.75 ? vec3(0.12, 0.15, 0.28) : vec3(0.30, 0.20, 0.12)) * lightW * 1.3;
   } else if (kind == 5) {
     float awake = o.a < 0.19 ? o.a / 0.177 : 0.0;
-    col = mix(vec3(0.15, 0.14, 0.12), vec3(1.0, 0.82, 0.5) * 1.4, step(h21(vec2(vSeed * 31.0, 1.0)), 0.25 + 0.6 * awake) * (1.0 - dark));
+    col = mix(vec3(0.15, 0.14, 0.12), vec3(1.0, 0.82, 0.5) * 1.4, step(h21(vec2(seed * 31.0, 1.0)), 0.25 + 0.6 * awake) * (1.0 - dark));
   } else if (roof) {
-    col = base * (0.9 + 0.2 * h21(floor(vW.xz * 0.5)));
-    col *= 0.34 + 0.08 * (1.0 - dark);
+    // Flat roofs: grey gravel and tar seams, a little lit by the street glow.
+    vec3 rb = mix(vec3(0.36, 0.35, 0.34), base, 0.35);
+    float grit = h21(floor(vW.xz * 2.0));
+    vec2 sm = abs(fract(vW.xz / 7.0) - 0.5);
+    col = rb * (0.85 + 0.25 * grit) * (min(sm.x, sm.y) < 0.03 ? 0.7 : 1.0);
+    col *= 0.36 + 0.08 * (1.0 - dark) + 0.25 * inField(vW) * dot(fieldLight(vW, dark), vec3(0.33));
   } else {
     // Light: dark-blue sky, sodium street light from below, a little side shading.
     // Faint skylight from the north-west so each face of a building reads differently.
@@ -160,12 +179,30 @@ void main() {
     float fl = floor(vW.y / fh), cl = floor(vU / cw);
     vec2 f = vec2(fract(vU / cw), fract(vW.y / fh));
     float win = step(0.28, f.x) * step(f.x, 0.72) * step(0.35, f.y) * step(f.y, 0.82) * step(1.0, vW.y) * step(vW.y, vH - 0.7);
-    float r = h21(vec2(fl * 7.0 + vSeed * 91.0, cl));
+    bool shop = false;
+    if (!house && vH > 0.5) {
+      // Bigger buildings: brick courses or concrete panels, a band at every floor, a
+      // cornice at the top; about half have shop fronts on the ground floor.
+      if (k < 0.33) col *= 0.88 + 0.12 * step(0.2, fract(vW.y / 0.3 + step(0.5, fract(vU / 0.9)) * 0.5));
+      else col *= 0.92 + 0.08 * step(0.04, fract(vU / 3.0));
+      if (fract(vW.y / fh) < 0.06 && vW.y > 2.0) col *= 0.75;
+      if (vW.y > vH - 0.6) col = col * 1.3 + 0.02;
+      shop = fract(seed * 3.31) < 0.5 && vH < 20.0;
+      if (shop && vW.y < 3.6) {
+        float sc = fract(vU / 4.2);
+        win = step(0.08, sc) * step(sc, 0.92) * step(0.45, vW.y) * step(vW.y, 2.9);
+        float door = step(0.9, h21(vec2(floor(vU / 4.2), seed)));
+        if (door > 0.5) win *= step(sc, 0.4) + step(0.65, sc);
+        if (vW.y > 2.9 && vW.y < 3.5) col = mix(vec3(0.5, 0.1, 0.08), vec3(0.1, 0.25, 0.4), step(0.5, fract(seed * 7.7))) * lightW * 1.4; // awning / sign band
+      }
+    }
+    float r = h21(vec2(fl * 7.0 + seed * 91.0, cl));
     // Lit windows follow who is awake: houses wake up one by one as the news spreads.
     float awake = o.a < 0.19 ? o.a / 0.177 : 0.0;
     float lit = step(r, (0.06 + 0.5 * awake) * (1.0 - dark));
+    if (shop && vW.y < 3.0) lit = step(0.35, h21(vec2(floor(vU / 4.2), seed * 3.0))) * (1.0 - dark); // shops leave lights on
     vec3 glass = vec3(0.05, 0.06, 0.10);
-    vec3 lamp = mix(vec3(1.0, 0.78, 0.42), vec3(0.75, 0.85, 1.0), step(0.85, h21(vec2(cl, fl + vSeed))));
+    vec3 lamp = mix(vec3(1.0, 0.78, 0.42), vec3(0.75, 0.85, 1.0), step(0.85, h21(vec2(cl, fl + seed))));
     vec3 wc = mix(glass, lamp * (0.7 + 0.3 * r), lit);
     // Burning: windows glow and flicker orange.
     wc = mix(wc, vec3(1.0, 0.45, 0.1) * flick * 1.3, step(0.5, fire) * step(r, 0.8));
@@ -359,6 +396,10 @@ export class CityLayer {
   private frameNo = 0;
   private agents: THREE.InstancedMesh;
   private rig: Rig | null = null;
+  readonly light: LightField;
+  /** Set each frame from the session: how far between street steps. */
+  streetAlpha = 1;
+  private litFrame = 0;
   private agentsB: THREE.InstancedMesh;
   private shadows: THREE.InstancedMesh;
   /** Cars people are driving away in (street level). */
@@ -394,7 +435,9 @@ export class CityLayer {
     this.overSmooth.minFilter = THREE.LinearFilter;
     this.overSmooth.flipY = false;
     this.overSmooth.needsUpdate = true;
+    this.light = new LightField();
     this.shared = {
+      ...this.light.uniforms(),
       over: { value: this.overTex },
       overS: { value: this.overSmooth },
       grid: { value: new THREE.Vector2(GW, GH) },
@@ -422,7 +465,7 @@ export class CityLayer {
     this.propMat = propMaterial(this.shared);
     // People: a little figure (body + head), lit from above by vertex shading.
     const mk = (geo: THREE.BufferGeometry) => {
-      const im = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), 2600);
+      const im = new THREE.InstancedMesh(geo, litBasic(new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), this.shared, 0.75), 2600);
       im.renderOrder = 1;
       im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(2600 * 3), 3);
@@ -442,6 +485,7 @@ export class CityLayer {
     this.shadows.count = 0;
     this.scene.add(this.shadows);
     // Cars on the move: one shape, many paint colours (multiplied in).
+    litBasic(vehicleMat, this.shared, 0.5);
     this.cars = new THREE.InstancedMesh(vehicleGeometry('car', 0xffffff), vehicleMat, 900);
     this.cars.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.cars.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(900 * 3), 3);
@@ -609,6 +653,37 @@ export class CityLayer {
       if (!vis && this.frameNo - tile.used > 600) this.dropTile(tile);
     }
     this.propMat.uniforms.alpha.value = this.alpha;
+    // Real light near where we look: lamps (when the field moves) and moving lights.
+    if (d < 3) {
+      const lv = cellToLocal(look.x, look.y, new THREE.Vector3());
+      this.light.centre(lv.x, lv.z, (x0, z0, x1, z1) => {
+        const a = localToCell(new THREE.Vector3(x0, 0, z0)), b = localToCell(new THREE.Vector3(x1, 0, z1));
+        const out: { x: number; z: number }[] = [];
+        const v = new THREE.Vector3();
+        for (const l of lampSpots(a.x, a.y, b.x, b.y)) {
+          cellToLocal(l.x, l.y, v);
+          out.push({ x: v.x + Math.cos(l.arm) * 1.6, z: v.z + Math.sin(l.arm) * 1.6 });
+        }
+        return out;
+      });
+      if (++this.litFrame % 2 === 0) {
+        const list: MovingLight[] = [];
+        const st = s.street, v = new THREE.Vector3();
+        if (st)
+          for (const a of st.agents) {
+            if (a.gone) continue;
+            if (a.car === 1 && a.kind === Kind.Living) {
+              cellToLocal(a.x, a.y, v);
+              list.push({ x: v.x, z: v.z, dir: a.face, power: 0.95, reach: 28 });
+            } else if (a.flash > 0) {
+              cellToLocal(a.x, a.y, v);
+              list.push({ x: v.x, z: v.z, dir: NaN, power: 1, reach: 8 });
+            }
+          }
+        this.light.moving(list);
+      }
+    }
+    this.streetAlpha = s.streetAlpha;
     this.updateStreet(s.street, time, look, d);
     this.updateCanopy(s);
     this.updateHeroes(s, d, time);
@@ -770,7 +845,7 @@ export class CityLayer {
 
   private updateStreet(st: Street | null, time: number, look: { x: number; y: number }, d: number) {
     const A = this.agents, A2 = this.agentsB, SH = this.shadows;
-    if (!this.rig) this.rig = new Rig(this.scene);
+    if (!this.rig) this.rig = new Rig(this.scene, this.shared);
     const rig = this.rig;
     rig.begin();
     if (!st) {
@@ -793,9 +868,13 @@ export class CityLayer {
     const yAxis = new THREE.Vector3(0, 1, 0), xAxis = new THREE.Vector3(1, 0, 0);
     let nc = 0;
     const CS = this.cars, cc = new THREE.Color();
+    const al = this.streetAlpha;
     for (let k = 0; k < st.agents.length && n + n2 < 2600; k++) {
       const a = st.agents[k];
-      cellToLocal(a.x, a.y, p);
+      // Between the last two steps (big jumps, like getting in a car, are not slid).
+      const jx = a.x - a.px, jy = a.y - a.py;
+      if (jx * jx + jy * jy < 0.003) cellToLocal(a.px + jx * al, a.py + jy * al, p);
+      else cellToLocal(a.x, a.y, p);
       if (a.kind === Kind.Living && a.car === 1) {
         // Driving away: a car, facing the way it goes.
         if (nc < 900) {
@@ -1196,6 +1275,7 @@ export function drawGround(g: CanvasRenderingContext2D, x0: number, y0: number, 
 
 /** Extruded buildings whose centre is in tile (x0,y0): walls with an along-wall coordinate
  *  for windows, and a flat roof. Returns null when the tile has none. */
+const PARAPET = 0.9;
 export function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.BufferGeometry | null {
   const B: Buf = { P: [], N: [], U: [], S: [], H: [], K: [], I: [] };
   const { P, N, U, S, H, I } = B;
@@ -1235,13 +1315,25 @@ export function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.Buffe
       // (A counter-clockwise ring has its inside on the left of each edge, so outward is to the right.)
       const nx = ((b.y - a.y) / len) * sign, nz = ((a.x - b.x) / len) * sign;
       const base = P.length / 3;
-      P.push(a.x, 0, a.y, b.x, 0, b.y, b.x, h, b.y, a.x, h, a.y);
+      const top = house ? h : h + PARAPET; // flat roofs get a low wall round the edge
+      // OSM often draws a building and its parts with the same front wall: nudge each
+      // building's walls out by its own few centimetres so two never fight (flicker).
+      const ox = nx * (0.02 + 0.08 * seed), oz = nz * (0.02 + 0.08 * seed);
+      P.push(a.x + ox, 0, a.y + oz, b.x + ox, 0, b.y + oz, b.x + ox, top, b.y + oz, a.x + ox, top, a.y + oz);
       for (let q = 0; q < 4; q++) N.push(nx, 0, nz), S.push(seed), H.push(h), B.K.push(wallKind);
       U.push(u, u + len, u + len, u);
       u += len;
       // Wind each wall so its front faces outward (back faces are skipped when drawing).
       if (sign > 0) I.push(base, base + 2, base + 1, base, base + 3, base + 2);
       else I.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      if (!house) {
+        // Inside face of the parapet (seen from above), facing in.
+        const ib = P.length / 3;
+        P.push(a.x, h, a.y, b.x, h, b.y, b.x, top, b.y, a.x, top, a.y);
+        for (let q = 0; q < 4; q++) N.push(-nx, 0, -nz), S.push(seed), H.push(0), B.K.push(HK.trim), U.push(0);
+        if (sign > 0) I.push(ib, ib + 1, ib + 2, ib, ib + 2, ib + 3);
+        else I.push(ib, ib + 2, ib + 1, ib, ib + 3, ib + 2);
+      }
     }
     if (house) {
       // A house: pitched roof, chimney, porch and door toward the nearest street.
@@ -1259,7 +1351,7 @@ export function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.Buffe
     const tris = THREE.ShapeUtils.triangulateShape(ring, []);
     const base = P.length / 3;
     for (const r of ring) {
-      P.push(r.x, h, r.y);
+      P.push(r.x, h + 0.05 * seed, r.y);
       N.push(0, 1, 0);
       U.push(0);
       S.push(seed);
@@ -1273,13 +1365,38 @@ export function buildingGeometry(s: Shapes, x0: number, y0: number): THREE.Buffe
       if (up > 0) I.push(base + t[0], base + t[1], base + t[2]);
       else I.push(base + t[0], base + t[2], base + t[1]);
     }
-    // Big flat roofs: a few air-conditioning boxes.
-    if (Math.abs(area) / 2 > 400 && h > 6) {
-      const c0 = ring.reduce((m, r) => m.add(r), new THREE.Vector2()).multiplyScalar(1 / n);
-      for (let q = 0; q < 1 + Math.floor(seed * 3); q++) {
-        const ox = (hash(k * 7 + q) - 0.5) * 6, oz = (hash(k * 11 + q) - 0.5) * 6;
-        hbox(B, c0.x + ox, h, c0.y + oz, 1, 0, 1, 0.8, 0.6, seed, HK.trim);
+    // Flat roofs: air-conditioning units, vents, and a stair house on tall buildings,
+    // placed only where they land inside the outline.
+    const A = Math.abs(area) / 2;
+    if (A > 150 && h > 5) {
+      let mx = 0, mz = 0;
+      for (const r of ring) (mx += r.x), (mz += r.y);
+      mx /= n;
+      mz /= n;
+      const rad = Math.sqrt(A) * 0.35;
+      const inside = (x: number, z: number) => {
+        let c = false;
+        for (let j = 0, i = n - 1; j < n; i = j++) {
+          const xi = ring[i].x, zi = ring[i].y, xj = ring[j].x, zj = ring[j].y;
+          if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) c = !c;
+        }
+        return c;
+      };
+      // Line the units up with the longest wall.
+      let best = 0, ax = 1, az = 0;
+      for (let j = 0; j < n; j++) {
+        const a = ring[j], b = ring[(j + 1) % n], l = a.distanceTo(b);
+        if (l > best) (best = l), (ax = (b.x - a.x) / l), (az = (b.y - a.y) / l);
       }
+      const units = Math.min(8, 1 + Math.floor(A / 300));
+      for (let q = 0; q < units; q++) {
+        const ox = (hash(k * 7 + q) - 0.5) * 2 * rad, oz = (hash(k * 11 + q) - 0.5) * 2 * rad;
+        const x = mx + ox, z = mz + oz;
+        if (!inside(x, z)) continue;
+        const big = hash(k * 13 + q) > 0.6;
+        hbox(B, x, h, z, ax, az, big ? 1.4 : 0.6, big ? 1.0 : 0.6, big ? 0.7 : 0.4, seed, HK.trim);
+      }
+      if (h > 14 && inside(mx, mz)) hbox(B, mx, h, mz, ax, az, 2.4, 1.8, 1.6, seed, HK.wall);
     }
   }
   if (!P.length) return null;

@@ -4,9 +4,10 @@
 // transfer brought a bitten patient into HCMC this afternoon); sandbox is a dev tool.
 import mapFile from '../data/minneapolis.json';
 import detailFile from '../data/detail.json';
+import { outside } from '../sim/street';
 import { inWindow, localTime, nightOver, passIndex, PASSES, rateAt, realSeconds, untilWindow, fmt } from './clock';
 import { createRadio, Group, nextLine, patch, Radio, stepRadio, tuned, warn, DIAL } from './radio';
-import { DetailFile, Detail, loadDetail } from '../map/detail';
+import { DetailFile, Detail, loadDetail, TILE } from '../map/detail';
 import { CityMap, loadMap, MapFile } from '../map/loadMap';
 import { cleanPlaces, NamedPlace } from '../map/places';
 import { createFires, Fires, stepFires } from '../sim/fire';
@@ -50,8 +51,13 @@ export const GH = city.height;
 const policeCells = new Set(places.filter((p) => p.kind === 'police').map((p) => Math.floor(p.y) * GW + Math.floor(p.x)));
 const fireStations = places.filter((p) => p.kind === 'fire').map((p) => Math.floor(p.y) * GW + Math.floor(p.x));
 
-// Where buildings stand, about 10 m per square: people walk around them, walls stop bullets.
+// Where buildings stand. A 10 m grid says free, solid, or "a wall runs through here";
+// those edge squares are split into 1.25 m squares on first use, tested against the real
+// building outline. So people walk right up to walls and round corners, never through.
+/** Street step length (game seconds). */
+const STREET_DT = 1 / 15;
 const OCC = 8;
+const SUB = 8; // 8 x 8 small squares per edge square (1.25 m)
 const occ = (() => {
   const W = GW * OCC, H = GH * OCC;
   const out = new Uint8Array(W * H);
@@ -80,16 +86,80 @@ const occ = (() => {
         for (let X = X0; X <= X1; X++) out[Y * W + X] = 1;
       }
     }
+    // Every square a wall passes through: 2 (decided in detail when asked).
+    for (let j = 0; j < n; j++) {
+      const jn = (j + 1) % n;
+      const ax = s.xy[(o + j) * 2] * OCC, ay = s.xy[(o + j) * 2 + 1] * OCC;
+      const bx = s.xy[(o + jn) * 2] * OCC, by = s.xy[(o + jn) * 2 + 1] * OCC;
+      const steps = Math.ceil(Math.hypot(bx - ax, by - ay) * 3) + 1;
+      for (let t = 0; t <= steps; t++) {
+        const X = Math.floor(ax + ((bx - ax) * t) / steps), Y = Math.floor(ay + ((by - ay) * t) / steps);
+        if (X >= 0 && Y >= 0 && X < W && Y < H) out[Y * W + X] = 2;
+      }
+    }
   }
   return out;
 })();
+/** Exactly inside a building outline (sheds and garages excluded)? */
+export function insideBuilding(x: number, y: number): boolean {
+  const s = det.buildings;
+  const T = TILE;
+  const list = s.tiles.get(Math.floor(y / T) * 1000 + Math.floor(x / T));
+  if (!list) return false;
+  for (const k of list) {
+    if (s.meta[k] < 4) continue;
+    if (x < s.box[k * 4] || x > s.box[k * 4 + 2] || y < s.box[k * 4 + 1] || y > s.box[k * 4 + 3]) continue;
+    const o = s.off[k], n = s.off[k + 1] - o;
+    let inside = false;
+    for (let j = 0, i = n - 1; j < n; i = j++) {
+      const xi = s.xy[(o + i) * 2], yi = s.xy[(o + i) * 2 + 1], xj = s.xy[(o + j) * 2], yj = s.xy[(o + j) * 2 + 1];
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+    if (inside) return true;
+  }
+  return false;
+}
+const fine = new Map<number, Uint8Array>();
 export const blocked = (x: number, y: number) => {
   const X = Math.floor(x * OCC), Y = Math.floor(y * OCC);
-  return X >= 0 && Y >= 0 && X < GW * OCC && Y < GH * OCC && occ[Y * GW * OCC + X] === 1;
+  if (X < 0 || Y < 0 || X >= GW * OCC || Y >= GH * OCC) return false;
+  const i = Y * GW * OCC + X;
+  const v = occ[i];
+  if (v !== 2) return v === 1;
+  let f = fine.get(i);
+  if (!f) {
+    // Only the outlines that touch this square, then 64 point tests against them.
+    f = new Uint8Array(SUB * SUB);
+    const sh = det.buildings;
+    const x0 = X / OCC, y0 = Y / OCC, x1 = (X + 1) / OCC, y1 = (Y + 1) / OCC;
+    const list = sh.tiles.get(Math.floor(y0 / TILE) * 1000 + Math.floor(x0 / TILE)) ?? [];
+    const near: number[] = [];
+    for (const k of list) if (sh.meta[k] >= 4 && sh.box[k * 4] <= x1 && sh.box[k * 4 + 2] >= x0 && sh.box[k * 4 + 1] <= y1 && sh.box[k * 4 + 3] >= y0) near.push(k);
+    for (let b = 0; b < SUB; b++)
+      for (let a = 0; a < SUB; a++) {
+        const px = (X + (a + 0.5) / SUB) / OCC, py = (Y + (b + 0.5) / SUB) / OCC;
+        for (const k of near) {
+          const o = sh.off[k], n = sh.off[k + 1] - o;
+          let inside = false;
+          for (let j = 0, q = n - 1; j < n; q = j++) {
+            const xi = sh.xy[(o + q) * 2], yi = sh.xy[(o + q) * 2 + 1], xj = sh.xy[(o + j) * 2], yj = sh.xy[(o + j) * 2 + 1];
+            if (yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
+          }
+          if (inside) {
+            f[b * SUB + a] = 1;
+            break;
+          }
+        }
+      }
+    fine.set(i, f);
+  }
+  const a = Math.min(SUB - 1, Math.floor((x * OCC - X) * SUB)), b = Math.min(SUB - 1, Math.floor((y * OCC - Y) * SUB));
+  return f[b * SUB + a] === 1;
 };
 function freeSpot(x: number, y: number): [number, number] {
   let px = x + Math.random(), py = y + Math.random();
   for (let k = 0; k < 10 && (blocked(px, py) || wet(px, py)); k++) (px = x + Math.random()), (py = y + Math.random());
+  if (blocked(px, py)) [px, py] = outside(px, py, blocked);
   return [px, py];
 }
 const cellAt = (x: number, y: number) => Math.floor(y) * GW + Math.floor(x);
@@ -177,7 +247,7 @@ export function streetPath(a: { x: number; y: number }, b: { x: number; y: numbe
   const X0 = Math.max(0, Math.floor(Math.min(a.x, b.x) * OCC) - pad), Y0 = Math.max(0, Math.floor(Math.min(a.y, b.y) * OCC) - pad);
   const X1 = Math.min(W - 1, Math.ceil(Math.max(a.x, b.x) * OCC) + pad), Y1 = Math.min(H - 1, Math.ceil(Math.max(a.y, b.y) * OCC) + pad);
   const bw = X1 - X0 + 1, bh = Y1 - Y0 + 1;
-  const wall = (X: number, Y: number) => occ[Y * W + X] === 1;
+  const wall = (X: number, Y: number) => occ[Y * W + X] === 1 || (occ[Y * W + X] === 2 && blocked((X + 0.5) / OCC, (Y + 0.5) / OCC));
   const rg = roads();
   // Cost of standing on a square: walls are impossible, squares next to walls cost more.
   const cost = new Float32Array(bw * bh);
@@ -330,6 +400,11 @@ function pathLengthTo(p: { x: number; y: number }[], k: number): number {
 }
 
 export class Session {
+  /** Average time of one street step (ms), for the speed meter and the test bot. */
+  stepMs = 0;
+  streetAcc = 0;
+  /** How far between the last two street steps the picture is (0..1). */
+  streetAlpha = 1;
   mode: Mode = 'title';
   world!: World;
   fires!: Fires;
@@ -1144,8 +1219,21 @@ export class Session {
       }
     }
     if (s && streetVisible) {
-      stepStreet(s, this.world, this.tick * 7919 + Math.floor(now), Math.min(0.3, gameDt), blocked, this.env(), onRoad, roadNet(), wet);
-      this.drainExits(s);
+      // The street moves in fixed steps (15 a second of game time); the picture slides
+      // smoothly between them (streetAlpha). Stepping every frame cost too much.
+      this.streetAcc += gameDt;
+      let n = 0;
+      while (this.streetAcc >= STREET_DT && n < 3) {
+        const dt = n === 2 ? Math.min(0.3, this.streetAcc) : STREET_DT;
+        this.streetAcc -= dt;
+        n++;
+        const t0 = performance.now();
+        stepStreet(s, this.world, this.tick * 7919 + Math.floor(now) + n, dt, blocked, this.env(), onRoad, roadNet(), wet);
+        this.stepMs = this.stepMs * 0.9 + (performance.now() - t0) * 0.1;
+        this.drainExits(s);
+      }
+      if (this.streetAcc > STREET_DT) this.streetAcc = 0;
+      this.streetAlpha = Math.min(1, this.streetAcc / STREET_DT);
     }
     this.updateSmoke(gameDt, zone);
     const { group, signal } = tuned(this.radio);

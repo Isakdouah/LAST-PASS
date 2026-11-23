@@ -3,6 +3,7 @@
 // Treetops dissolve in a pixel pattern where people are underneath, so trees never hide
 // what is happening on the ground; the thermal camera sees through leaves.
 import * as THREE from 'three';
+import { LIGHT_PARS } from './lightfield';
 import { hash, Lamp, Tree, TreeKind } from './props';
 
 const V = 1.1; // block size in metres for crowns
@@ -147,6 +148,7 @@ const PROP_F = /* glsl */ `#include <common>
 #include <logdepthbuf_pars_fragment>
 uniform sampler2D overS; uniform vec2 grid; uniform vec2 cellM; uniform float time; uniform float thermal; uniform float alpha;
 varying vec3 vC; varying float vFade; varying float vWarm; varying float vGlow; varying vec3 vW; varying float vY; varying float vCan;
+${LIGHT_PARS}
 float bayer4(vec2 p) {
   vec2 q = mod(floor(p), 4.0);
   // 4x4 ordered pattern, as a lookup by arithmetic.
@@ -166,7 +168,8 @@ void main() {
   vec3 moon = vec3(0.2, 0.23, 0.3);
   float lamp = vWarm * (1.0 - dark) * (0.35 + 0.65 * exp(-max(0.0, vY - 2.0) / 7.0));
   float flick = 0.8 + 0.2 * sin(time * 9.0 + cp.x * 3.0);
-  vec3 light = moon + vec3(1.0, 0.66, 0.34) * lamp * 1.1 + vec3(1.0, 0.4, 0.1) * os.r * os.r * flick * 1.4;
+  vec3 near = mix(vec3(1.0, 0.66, 0.34) * lamp * 1.1, fieldLight(vW, dark), inField(vW));
+  vec3 light = moon + near + vec3(1.0, 0.4, 0.1) * os.r * os.r * flick * 1.4;
   vec3 col = vC * light;
   if (vGlow > 0.5) col = mix(vec3(1.0, 0.78, 0.42), vec3(0.08, 0.08, 0.09), dark);
   if (thermal > 0.5) col = vec3(0.1, 0.1, 0.12) + vec3(0.1) * vGlow * (1.0 - dark);
