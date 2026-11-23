@@ -121,6 +121,8 @@ export interface Agent {
   think: number;
   /** Left the area (drove off): removed at the end of the step. */
   gone: boolean;
+  /** The living: passed over by the dead (see SPARED). */
+  spared: boolean;
 }
 
 export interface Bullet {
@@ -253,6 +255,10 @@ const RISE = 1.2; // seconds getting up after turning
 const FRESH = 120; // seconds a new one stays extra fast
 /** How many of the dead holding someone kills them (trained people last longer). */
 export const PILE = { civ: 2, trained: 3 };
+/** Who the dead pass by. Our rule, easy to swap or switch off (share 0): people burning with
+ *  a high fever. October 2009 is the height of the H1N1 flu, so about 1 in 100 people out on
+ *  the street is sick enough (a guess). They still fear the dead; the dead just ignore them. */
+export const SPARED = { share: 0.01, why: 'fever' };
 
 export function emptyStats(): StreetStats {
   return { shots: 0, hits: 0, heads: 0, stray: 0, fights: 0, melee: 0, bites: 0, getUps: 0, grabs: 0, eaten: 0, freed: 0, rescues: 0, turned: 0, crawlers: 0, drove: 0, crashes: 0, abandoned: 0, cameOut: 0, caughtInside: 0 };
@@ -304,6 +310,7 @@ export function newAgent(x: number, y: number, kind: Kind, ammo = 0, role = Role
     tgt: null,
     think: 0,
     gone: false,
+    spared: false,
   };
 }
 
@@ -429,6 +436,7 @@ export function enterStreet(
         // Police stand in a loose ring around their station.
         const role = isStation && ammo > 0 ? Role.Police : Role.Civilian;
         const a = equip(newAgent(...spot(x, y, r, blocked, role === Role.Police), Kind.Living, ammo, role), r, world.know[i]);
+        a.spared = r() < SPARED.share;
         if (moving > 0 && r() < moving / Math.max(share, 1e-6)) (a.fear = 1), (a.car = a.hasCar ? 2 : 0);
         s.agents.push(a);
       }
@@ -1057,7 +1065,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
                 else z.down = 1.2;
                 st.rescues++;
                 release(v);
-              } else if (roll > 0.85) {
+              } else if (roll > 0.85 && !a.spared) {
                 // It turns on the rescuer.
                 z.hold = null;
                 grab(z, a);
@@ -1187,7 +1195,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       }
       if (--a.think <= 0 || (a.tgt && (a.tgt.kind !== Kind.Living || a.tgt.gone || a.tgt.turn >= 0 || a.tgt.held > 0))) {
         // Someone free first; one already held only if nobody else is near (that is a pile-on).
-        a.tgt = nearest(a, (o) => o.kind === Kind.Living && !o.gone && o.turn < 0 && o.held === 0, HUNT) ?? nearest(a, (o) => o.kind === Kind.Living && !o.gone && o.turn < 0, m(25));
+        a.tgt = nearest(a, (o) => o.kind === Kind.Living && !o.gone && !o.spared && o.turn < 0 && o.held === 0, HUNT) ?? nearest(a, (o) => o.kind === Kind.Living && !o.gone && !o.spared && o.turn < 0, m(25));
         a.think = 3 + Math.floor(r() * 3);
       }
       if (a.fresh >= 0) {
@@ -1497,6 +1505,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       const [ax, ay] = spot(x, y, r, blocked);
       const armed = s.indoorArmed[li] > 0 && r() < s.indoorArmed[li] / Math.max(1, s.indoor[li]);
       const a = equip(newAgent(ax, ay, Kind.Living, armed ? Math.max(1, Math.round(am / Math.max(1, out / s.scale))) : 0), r, 0);
+      a.spared = r() < SPARED.share;
       a.fear = 1;
       if (a.hasCar) a.car = 2;
       s.agents.push(a);

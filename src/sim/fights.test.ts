@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createWorld, rng } from './outbreak';
-import { equip, Gun, Kind, newAgent, newStreet, PILE, Role, stepStreet, TURN } from './street';
+import { equip, Gun, Kind, newAgent, newStreet, PILE, Role, SPARED, stepStreet, TURN } from './street';
 
 const NIGHT = { hour: 22, dark: 0.8, news: 0 };
 
@@ -246,5 +246,25 @@ describe('fights (street level)', () => {
       if (a.role === Role.Hunter) kinds.add(a.gun);
     }
     expect(kinds.has(Gun.Rifle) && kinds.has(Gun.Shotgun)).toBe(true);
+  });
+
+  it('the dead pass over people with a fever (SPARED) and go for the healthy one beside them', () => {
+    let sparedHurt = 0, otherHurt = 0;
+    for (let k = 0; k < 20; k++) {
+      const w = createWorld(10, 10);
+      const s = newStreet(0, 0, 10, 10);
+      const sick = newAgent(5, 5, Kind.Living);
+      sick.spared = true;
+      const well = newAgent(5.15, 5, Kind.Living);
+      s.agents.push(sick, well);
+      for (let j = 0; j < 3; j++) s.agents.push(newAgent(5.02 + j * 0.01, 5.02, Kind.Dead));
+      for (let t = 0; t < 80; t++) stepStreet(s, w, k * 1000 + t, 0.25, undefined, NIGHT);
+      if (sick.kind !== Kind.Living || sick.turn >= 0 || sick.held > 0) sparedHurt++;
+      if (well.kind !== Kind.Living || well.turn >= 0) otherHurt++;
+    }
+    expect(sparedHurt).toBe(0);
+    expect(otherHurt).toBeGreaterThan(10);
+    expect(SPARED.share).toBeGreaterThan(0);
+    expect(SPARED.share).toBeLessThan(0.05); // a few lonely survivors, not a safe crowd
   });
 });

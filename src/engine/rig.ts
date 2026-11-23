@@ -346,6 +346,7 @@ export class Rig {
       if (hat < 0) ha.multiplyScalar(0.6); // matted
       else if (h(u * 29) > 0.5) (hat = -1), ha.setHex(0x2a2018); // lost the hat
     } else if (a.kind === Kind.Living && a.turn >= 0) sk.lerp(new THREE.Color(0x9aa08a), 0.5), hand.copy(sk);
+    else if (a.spared) sk.lerp(new THREE.Color(0xd8584a), 0.3), hand.copy(sk); // fever-flushed (the dead pass them by)
     if (a.kind === Kind.Fallen) for (const c of [sk, hand, sh, pa, ha, so]) c.multiplyScalar(0.6);
     if (thermal) {
       sk.copy(thermal), hand.copy(thermal);
