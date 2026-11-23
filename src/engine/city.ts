@@ -8,7 +8,7 @@ import { det, GW, GH, CELL_X, CELL_Y, Session, places, blocked, roadNet, setSoli
 import { lampSpots, nearOtherRoad, paved, treeSpots } from './props';
 import { buildLamps, buildTrees, propMaterial, TileTrees } from './propMeshes';
 import { nearestRoad, pointAt } from '../sim/roadnet';
-import { CAR_COLOURS, SIZE, VEHICLE_SCALE, vehicleGeometry, VKind } from './vehicles';
+import { CAR_COLOURS, CAR_STYLES, carLightsGeometry, SIZE, VEHICLE_SCALE, vehicleGeometry, VKind } from './vehicles';
 import { HEROES } from '../game/heroes';
 import { Rig } from './rig';
 import { LightField, LIGHT_PARS, litBasic, MovingLight } from './lightfield';
@@ -276,6 +276,8 @@ export interface CarSpot {
   x: number; // map cells
   y: number;
   angle: number; // radians about the up axis (model faces +z)
+  /** Body style (see CAR_STYLES). */
+  style: number;
   kind: VKind;
   colour: number;
 }
@@ -310,7 +312,7 @@ export function parkedCarSpots(x0: number, y0: number): CarSpot[] {
           if (!clear) continue;
           // Not in a junction or on a crosswalk: keep clear of every other street.
           if (nearOtherRoad(k, cx, cy, 8.5)) continue;
-          out.push({ x: cx, y: cy, angle: Math.atan2(ux, uy) + (h < 0.16 ? Math.PI : 0), kind, colour: CAR_COLOURS[Math.floor(hash(k * 3 + j * 11 + d) * CAR_COLOURS.length)] });
+          out.push({ x: cx, y: cy, angle: Math.atan2(ux, uy) + (h < 0.16 ? Math.PI : 0), kind, style: Math.floor(hash(k * 7 + j * 13 + d * 3) * CAR_STYLES), colour: CAR_COLOURS[Math.floor(hash(k * 3 + j * 11 + d) * CAR_COLOURS.length)] });
         }
       }
     }
@@ -370,8 +372,8 @@ function parkedCars(x0: number, y0: number): THREE.BufferGeometry | null {
     m.compose(new THREE.Vector3(p.x + 0.6, 0.04, p.z + 0.6), q, one);
     sh.applyMatrix4(m);
     list.unshift(sh);
-    const key = c.kind + c.colour;
-    if (!carCache.has(key)) carCache.set(key, vehicleGeometry(c.kind, c.colour));
+    const key = c.kind + c.colour + '/' + c.style;
+    if (!carCache.has(key)) carCache.set(key, vehicleGeometry(c.kind, c.colour, c.style));
     const g = carCache.get(key)!.clone();
     m.compose(p, q, sc);
     g.applyMatrix4(m);
@@ -442,7 +444,9 @@ export class CityLayer {
   private agentsB: THREE.InstancedMesh;
   private shadows: THREE.InstancedMesh;
   /** Cars people are driving away in (street level). */
-  private cars: THREE.InstancedMesh;
+  private cars: THREE.InstancedMesh[];
+  /** Lit head- and taillights of cars on the move. */
+  private carLights: THREE.InstancedMesh;
   private heroVeh = new Map<string, THREE.Mesh>();
   private heroFig = new Map<string, THREE.Mesh>();
   private selBox: THREE.LineSegments;
@@ -525,13 +529,23 @@ export class CityLayer {
     this.scene.add(this.shadows);
     // Cars on the move: one shape, many paint colours (multiplied in).
     litBasic(vehicleMat, this.shared, 0.5);
-    this.cars = new THREE.InstancedMesh(vehicleGeometry('car', 0xffffff), vehicleMat, 900);
-    this.cars.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.cars.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(900 * 3), 3);
-    this.cars.frustumCulled = false;
-    this.cars.renderOrder = 0.6;
-    this.cars.count = 0;
-    this.scene.add(this.cars);
+    this.cars = [];
+    for (let st = 0; st < CAR_STYLES; st++) {
+      const im = new THREE.InstancedMesh(vehicleGeometry('car', 0xffffff, st), vehicleMat, 900);
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(900 * 3), 3);
+      im.frustumCulled = false;
+      im.renderOrder = 0.6;
+      im.count = 0;
+      this.scene.add(im);
+      this.cars.push(im);
+    }
+    this.carLights = new THREE.InstancedMesh(carLightsGeometry(), new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true }), 900);
+    this.carLights.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.carLights.frustumCulled = false;
+    this.carLights.renderOrder = 0.65;
+    this.carLights.count = 0;
+    this.scene.add(this.carLights);
     // Heroes: their vehicle and themselves, and a thin selection box.
     for (const h of HEROES) {
       const v = new THREE.Mesh(vehicleGeometry(h.vehicle.kind, h.vehicle.colour), vehicleMat);
@@ -932,7 +946,8 @@ export class CityLayer {
       A.count = 0;
       A2.count = 0;
       SH.count = 0;
-      this.cars.count = 0;
+      for (const im of this.cars) im.count = 0;
+      this.carLights.count = 0;
       this.blood.count = 0;
       (this.tracers.geometry as THREE.BufferGeometry).setDrawRange(0, 0);
       return;
@@ -945,8 +960,16 @@ export class CityLayer {
     const m = this.tmpM, q = this.tmpQ, p = this.tmpV, sc = this.tmpS;
     const one = new THREE.Vector3(1, 1, 1), sp = new THREE.Vector3(), q0 = new THREE.Quaternion();
     const yAxis = new THREE.Vector3(0, 1, 0), xAxis = new THREE.Vector3(1, 0, 0);
-    let nc = 0;
-    const CS = this.cars, cc = new THREE.Color();
+    const ncs = new Array(CAR_STYLES).fill(0);
+    let nc = 0, nl = 0;
+    const cc = new THREE.Color();
+    const putCar = (uid: number, mat: THREE.Matrix4, col: THREE.Color) => {
+      const st = Math.floor(hash(uid * 131 + 7) * CAR_STYLES), im = this.cars[st];
+      im.setMatrixAt(ncs[st], mat);
+      im.setColorAt(ncs[st], col);
+      ncs[st]++;
+      nc++;
+    };
     const al = this.streetAlpha;
     for (let k = 0; k < st.agents.length && n + n2 < 2600; k++) {
       const a = st.agents[k];
@@ -960,10 +983,9 @@ export class CityLayer {
           q.setFromAxisAngle(yAxis, -a.face + Math.PI / 2);
           p.y = 0;
           m.compose(p, q, sc.set(VEHICLE_SCALE, VEHICLE_SCALE, VEHICLE_SCALE));
-          CS.setMatrixAt(nc, m);
           cc.setHex(CAR_COLOURS[Math.floor(hash(a.uid * 977) * CAR_COLOURS.length)]);
-          CS.setColorAt(nc, this.thermal ? THERM.warm : cc);
-          nc++;
+          putCar(a.uid, m, this.thermal ? THERM.warm : cc);
+          if (!this.thermal) this.carLights.setMatrixAt(nl++, m);
         }
         continue;
       }
@@ -1043,16 +1065,18 @@ export class CityLayer {
       p.y = 0;
       q.setFromAxisAngle(yAxis, -w.face + Math.PI / 2 + (w.crashed ? (hash(w.uid) - 0.5) * 0.9 : 0));
       m.compose(p, q, sc.set(VEHICLE_SCALE, VEHICLE_SCALE, VEHICLE_SCALE));
-      CS.setMatrixAt(nc, m);
       if (this.thermal) cc.copy(w.burn > 0 ? THERM.warm : THERM.cool);
       else if (w.crashed) cc.setHex(w.burn > 0 ? 0x3a2a20 : 0x2a2622);
       else cc.setHex(CAR_COLOURS[Math.floor(hash(w.uid * 977) * CAR_COLOURS.length)]).multiplyScalar(0.55);
-      CS.setColorAt(nc, cc);
-      nc++;
+      putCar(w.uid, m, cc);
     }
-    CS.count = nc;
-    CS.instanceMatrix.needsUpdate = true;
-    if (CS.instanceColor) CS.instanceColor.needsUpdate = true;
+    this.cars.forEach((im, i) => {
+      im.count = ncs[i];
+      im.instanceMatrix.needsUpdate = true;
+      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    });
+    this.carLights.count = nl;
+    this.carLights.instanceMatrix.needsUpdate = true;
     // Blood on the ground.
     const B = this.blood;
     const nb = Math.min(4000, st.blood.length);

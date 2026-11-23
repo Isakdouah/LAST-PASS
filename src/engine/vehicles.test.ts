@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { SIZE, vehicleGeometry, VKind } from './vehicles';
+import { CAR_STYLES, SIZE, vehicleGeometry, VKind } from './vehicles';
 import { parkedAt, parkedCarSpots } from './city';
 import { blocked, GH, GW } from '../game/session';
 import { TILE } from '../map/detail';
@@ -20,6 +20,16 @@ describe('size contract', () => {
       expect(sz.y, `${kind} height`).toBeGreaterThan(want.h - 0.15);
       expect(sz.y, `${kind} height`).toBeLessThan(want.h + 0.6);
       expect(b.min.y, `${kind} wheels on the ground`).toBeCloseTo(0, 1);
+    }
+    // Every car body style keeps the car footprint (parking and collisions rely on it).
+    for (let st = 0; st < CAR_STYLES; st++) {
+      const g = vehicleGeometry('car', 0xffffff, st);
+      g.computeBoundingBox();
+      const sz = new THREE.Vector3();
+      g.boundingBox!.getSize(sz);
+      expect(Math.abs(sz.z - SIZE.car.l), `style ${st} length`).toBeLessThan(0.15);
+      expect(Math.abs(sz.x - SIZE.car.w), `style ${st} width`).toBeLessThan(0.15);
+      expect(sz.y, `style ${st} height`).toBeLessThan(1.9);
     }
   });
   it('a bus is longer than a car, a car longer than a person is tall', () => {
