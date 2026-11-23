@@ -44,3 +44,32 @@ stay readable but a bus still dwarfs a person.
 - Hero escape routes never pass through a building (`heroes.test.ts`, every 5 m).
 - Parked cars never stand inside a building (`vehicles.test.ts`, all four corners).
 - Ships stay on open water, outbreaks sit on land (`world.test.ts`, against the land mask).
+
+## Up close (draft 10, 23 Nov 2026)
+
+These are the rules the close-up city follows now. Each one has a check behind it.
+
+1. **Outlines.** Every object gets a one-pixel dark outline where it stands in front of something further
+   away, and a faint light rim on its top edge (`pixel.ts`, from the depth buffer). This is what makes boxes
+   read as pixel art instead of plain 3D.
+2. **Light comes in steps.** Lamps light the ground, walls, trees, people and cars in 5 hard steps;
+   headlights and gun flashes in 4 (`lightfield.ts`). Night haze beyond where you look also comes in 6 steps.
+3. **People up close are 16 parts:** jacket, hips, head, hair or hat, upper arms, forearms, hands, thighs,
+   shins, shoes. Knees and elbows bend. Steps are counted from the distance walked, so feet do not slide
+   (`rig.ts`, tested). Police wear navy caps, hunters orange. About 1 in 5 wears a beanie. The dead have
+   grey-green skin, bloodied hands, torn sleeves and lolling heads.
+4. **Cars:** five 2009 body styles (sedan, hatchback, wagon, SUV, minivan), all on the same footprint so
+   parking and collisions hold (`vehicles.test.ts`). Cars on the move show lit headlights and red taillights.
+5. **Ground:** within about 120 m of where you look the ground is drawn at about 3 pixels per metre
+   (lane dashes, crosswalk stripes, kerbs are sharp); further out 1 pixel per metre.
+6. **Street dressing by rule** (`dressing.ts`, tested): stop signs where a side street meets one as big or
+   bigger, hydrants at some corners, wooden power poles with sagging wires along residential streets,
+   garbage carts on the boulevard. Lamp posts, parked cars and dressing never stand in a junction or on a
+   street surface. Simplification: Minneapolis runs most power lines down alleys; our map has no alleys.
+7. **Solid things:** buildings (to 1.25 m), parked cars (to the exact body) stop people and bullets.
+
+## Known gaps (next)
+
+- Trees are blocky clusters; Ebbtide's read as softer silhouettes.
+- No fences, porches are walk-through, no apartment balconies or fire escapes yet.
+- Wires are thinner than a pixel from high up, so they come and go at the 400 m view.

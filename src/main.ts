@@ -520,7 +520,7 @@ function titleText() {
     <div>You are the last one up here. You cannot move anyone.</div>
     <div>You can look, listen, speak and connect people.</div><br>
     <div class="mark">[Enter] begin</div><br>
-    <div class="small">Headphones on. Rough draft 9: names, voices and lines are placeholders.<br>
+    <div class="small">Headphones on. Rough draft 10: names, voices and lines are placeholders.<br>
     Map data © OpenStreetMap contributors (ODbL). Place names and city lights: GeoNames (CC BY 4.0). Numbers are estimates.</div>`;
 }
 function endText() {
