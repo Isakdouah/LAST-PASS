@@ -26,6 +26,8 @@ export const enum Role {
   Police = 1,
   Hunter = 2,
   Soldier = 3,
+  /** Firefighters: trained, an axe, a crew that sticks together. */
+  Fire = 4,
 }
 
 export const enum Gun {
@@ -33,15 +35,45 @@ export const enum Gun {
   Handgun = 1,
   Shotgun = 2,
   Rifle = 3,
+  AR15 = 4,
+  AK = 5,
 }
 
-/** What a body hit does, per gun (guess): seconds knocked down, and chance to cripple. */
+/**
+ * The guns (our game numbers, guesses tuned for play, not ballistics):
+ * aim = how much easier a hit is than with a handgun (two hands, a stock, sights);
+ * range = metres they will shoot at; cool = seconds between aimed shots for someone trained
+ * (people without training take longer); knock = seconds a body hit puts one of the dead down;
+ * cripple = chance a body hit takes the legs; head = how much more often a hit is the head.
+ * A shotgun is deadly close and poor past 25 m. A semi-automatic rifle in the hands of
+ * someone who knows to aim for the head can stop a crowd.
+ */
 export const GUNS = [
-  { name: 'none', knock: 0, cripple: 0 },
-  { name: 'handgun', knock: 1.5, cripple: 0.08 },
-  { name: 'shotgun', knock: 3, cripple: 0.25 },
-  { name: 'rifle', knock: 2.5, cripple: 0.3 },
+  { name: 'none', aim: 0, range: 0, cool: 1, knock: 0, cripple: 0, head: 0 },
+  { name: 'handgun', aim: 1, range: 60, cool: 0.6, knock: 1.5, cripple: 0.08, head: 1 },
+  { name: '12-gauge shotgun', aim: 1.6, range: 35, cool: 1.0, knock: 3, cripple: 0.3, head: 1.1 },
+  { name: 'hunting rifle', aim: 1.8, range: 150, cool: 1.8, knock: 2.5, cripple: 0.3, head: 1.35 },
+  { name: 'AR-15', aim: 1.6, range: 120, cool: 0.35, knock: 2, cripple: 0.25, head: 1.3 },
+  { name: 'AK-47 (semi-auto copy)', aim: 1.4, range: 110, cool: 0.35, knock: 2.5, cripple: 0.3, head: 1.15 },
 ];
+/** How well a gun does at a distance (shotguns fall off fast). */
+export function gunAim(gun: Gun, metres: number): number {
+  const g = GUNS[gun] ?? GUNS[1];
+  if (gun === Gun.Shotgun) return metres <= 15 ? 1.9 : metres <= 25 ? 1.2 : 0.8;
+  return g.aim;
+}
+/** Which gun an armed person has, by the dice (guesses for Minnesota, 2009: a hunting state,
+ *  most guns at home are handguns, shotguns and deer rifles; a few military-style rifles).
+ *  Police: a duty handgun; some patrol cars carry a shotgun or a patrol rifle. */
+export function pickGun(role: Role, r: () => number): Gun {
+  const t = r();
+  if (role === Role.Police) return t < 0.65 ? Gun.Handgun : t < 0.85 ? Gun.Shotgun : Gun.AR15;
+  if (role === Role.Soldier) return Gun.AR15;
+  if (role === Role.Hunter) return t < 0.55 ? Gun.Rifle : t < 0.85 ? Gun.Shotgun : Gun.AR15;
+  return t < 0.5 ? Gun.Handgun : t < 0.75 ? Gun.Shotgun : t < 0.9 ? Gun.Rifle : t < 0.97 ? Gun.AR15 : Gun.AK;
+}
+/** Shooting range (map cells) for whatever they carry. */
+const gunRange = (a: Agent) => m((GUNS[a.gun] ?? GUNS[1]).range);
 
 /** Things people grab. Share = how many have it to hand (guess; many have nothing).
  *  kill = chance one swing puts one down for good (a blow to the head); knock = knocks it over. */
@@ -54,7 +86,10 @@ export const WEAPONS = [
   { name: 'frying pan', share: 0.05, kill: 0.05, knock: 0.3 },
   { name: 'hammer', share: 0.04, kill: 0.15, knock: 0.2 },
   { name: 'machete', share: 0.03, kill: 0.3, knock: 0.3 },
+  // Firefighters carry one (a flat-head axe, from the truck). Nobody else draws it.
+  { name: 'fire axe', share: 0, kill: 0.32, knock: 0.35 },
 ];
+export const AXE = 8;
 
 export interface Agent {
   x: number;
@@ -132,6 +167,8 @@ export interface Agent {
   rest: number;
   /** Fight (> 0) or flight (< 0): seconds left before they think again. */
   mind: number;
+  /** Crew of a responder vehicle (its id), or -1. One drawn crew member is one real person. */
+  unit: number;
 }
 
 export interface Bullet {
@@ -258,8 +295,6 @@ const SEE = m(120); // how far people notice the dead
 const BITE = m(1.3); // contact distance
 const HUNT = m(200); // how far the dead notice the living
 const HEAR = m(450); // how far the dead hear gunfire
-const RANGE = { civ: m(55), police: m(90) }; // how far the armed shoot
-const COOL = { civ: 1.3, police: 0.6 }; // seconds between shots
 const BULLET_SPEED = m(170); // slowed down so you can see it (real bullets are invisible)
 const BODY_R = m(0.6); // a stray bullet passing this close to someone may hit them
 const STRAY_HIT = 0.35; // chance it does (one of the dead, coming at you)
@@ -335,6 +370,7 @@ export function newAgent(x: number, y: number, kind: Kind, ammo = 0, role = Role
     aim: null,
     rest: 0,
     mind: 0,
+    unit: -1,
   };
 }
 
@@ -343,10 +379,11 @@ export function equip(a: Agent, r: () => number, know = 0): Agent {
   if (a.kind !== Kind.Living) return a;
   if (a.armed && a.role === Role.Civilian) {
     const t = r();
-    if (t < 0.3) (a.skill = SKILL.untrained), (a.gun = Gun.Handgun);
-    else if (t < 0.75) (a.skill = SKILL.regular), (a.gun = r() < 0.7 ? Gun.Handgun : Gun.Shotgun);
-    else (a.skill = SKILL.hunter), (a.role = Role.Hunter), (a.gun = r() < 0.5 ? Gun.Rifle : Gun.Shotgun);
-  }
+    if (t < 0.3) a.skill = SKILL.untrained;
+    else if (t < 0.75) a.skill = SKILL.regular;
+    else (a.skill = SKILL.hunter), (a.role = Role.Hunter);
+    a.gun = pickGun(a.role, r);
+  } else if (a.armed && a.role === Role.Police && a.gun === Gun.Handgun) a.gun = pickGun(Role.Police, r);
   let w = r(), k = 0;
   while (k < WEAPONS.length - 1 && w >= WEAPONS[k].share) (w -= WEAPONS[k].share), k++;
   a.weapon = k;
@@ -562,7 +599,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     const cx = Math.floor(a.x), cy = Math.floor(a.y);
     return cx >= 0 && cy >= 0 && cx < world.width && cy < world.height ? world.calm[cy * world.width + cx] : 0;
   };
-  const trained = (p: Agent) => p.role === Role.Police || p.role === Role.Soldier;
+  const trained = (p: Agent) => p.role === Role.Police || p.role === Role.Soldier || p.role === Role.Fire;
 
   // ---- Finding the way on foot (nav.ts) ----
   // One field is refreshed each sixth of a second, in turn: toward the living (the dead
@@ -631,13 +668,13 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
   const fire = (a: Agent, target: Agent, aimAtLiving: boolean) => {
     if (!seen(a, target)) st.blind++;
     const metres = Math.sqrt(d2(a, target)) * M;
-    const p = hitChance({ skill: a.skill, dark: env.dark, fear: a.fear, metres, know: a.know });
+    const p = Math.min(0.95, hitChance({ skill: a.skill, dark: env.dark, fear: a.fear, metres, know: a.know }) * gunAim(a.gun, metres));
     const hit = r() < p;
-    const head = hit && !aimAtLiving && r() < headShare(a.know);
+    const head = hit && !aimAtLiving && r() < Math.min(0.95, headShare(a.know) * (GUNS[a.gun] ?? GUNS[1]).head);
     // A miss goes off to one side; a hit goes true.
     const err = hit ? 0 : (r() < 0.5 ? -1 : 1) * (0.04 + r() * 0.2);
     const ang = Math.atan2(target.y - a.y, target.x - a.x) + err;
-    const range = a.role === Role.Police ? RANGE.police : RANGE.civ;
+    const range = gunRange(a);
     // Shooting one of the dead off someone: a miss may hit the person it holds.
     const held = !hit && !aimAtLiving ? target.hold : null;
     if (held && held.kind === Kind.Living && r() < 0.35) {
@@ -645,7 +682,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       s.bullets.push({ x: a.x, y: a.y, px: a.x, py: a.y, dx: Math.cos(ang2) * BULLET_SPEED, dy: Math.sin(ang2) * BULLET_SPEED, life: (range * 1.6) / BULLET_SPEED, target: held, hit: true, head: false, gun: a.gun, from: a });
     } else s.bullets.push({ x: a.x, y: a.y, px: a.x, py: a.y, dx: Math.cos(ang) * BULLET_SPEED, dy: Math.sin(ang) * BULLET_SPEED, life: (range * 1.6) / BULLET_SPEED, target, hit, head, gun: a.gun, from: a });
     a.ammo--;
-    a.cooldown = (a.role === Role.Police || a.role === Role.Soldier ? COOL.police : COOL.civ) * (0.8 + r() * 0.4);
+    a.cooldown = (GUNS[a.gun] ?? GUNS[1]).cool * (a.role === Role.Police || a.role === Role.Soldier || a.role === Role.Hunter ? 1 : 1.8) * (0.8 + r() * 0.4);
     a.flash = 3;
     a.face = ang;
     s.shots++;
@@ -1101,7 +1138,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         continue;
       }
 
-      const range = a.role === Role.Police ? RANGE.police : RANGE.civ;
+      const range = gunRange(a);
       if (--a.think <= 0 || (a.tgt && a.tgt.kind !== Kind.Dead)) {
         a.tgt = nearest(a, isDead, SEE);
         a.think = 3 + Math.floor(r() * 3);
@@ -1193,9 +1230,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
           else (a.aim = null), (a.think = 0);
         }
       } else if (carWay) {
-(a as any).br='CAR';
         // Getting to the car, parked at the kerb: run to the street, then drive off.
-(a as any).br='CARK';
         if (carWay.dist < m(4) && r() < 1.5 * dt) {
           a.car = 1;
           a.road = -1;
@@ -1221,7 +1256,6 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         ty = a.y - z.y;
         speed = SPEED.run;
       } else if (z && a.ammo > 0 && (a.role !== Role.Civilian || a.bold > 0.6) && a.fear < 0.95 + (a.role !== Role.Civilian ? 1 : 0) && way(s.fDead, a)) {
-(a as any).br='APP';
         // Police, hunters and the bold close in, round the buildings, until they have a
         // clear shot (then they stop and shoot, above). Not straight at a wall.
         const w = way(s.fDead, a)!;
@@ -1243,7 +1277,6 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         }
         a.face = Math.atan2(z.y - a.y, z.x - a.x);
       } else if (z) {
-(a as any).br='Z';
         // The choice: fight with what they hold, run to a gun, run to the car, or just run.
         // Fight or flight: decided, then kept for a couple of seconds (no dithering).
         if (a.mind > 0) a.mind = Math.max(0, a.mind - dt);
@@ -1282,7 +1315,6 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
           // from the dead along the streets (not into a wall).
           const safe = farM(s.fSafe, a);
           const w = safe < RALLY * M ? way(s.fSafe, a) : null;
-(a as any).br='RUN';
           // There, or at the edge of the group gathered round them: stay put.
           if (a.rest > 0 && d2(a, z) > m(8) ** 2) (a.rest -= dt), (speed = 0);
           else if (safe < 2.5 || (safe < 15 && countNear(a, isLiving, m(1.6), 2) >= 2)) (speed = 0), (a.rest = 2 + r() * 2);
@@ -1299,10 +1331,10 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         }
       } else if (a.role !== Role.Police || a.fear < 0.5) {
         // Walking along: keep the way they face, a little drift; turn at walls (below).
-        wander = a.role !== Role.Police;
+        wander = a.role !== Role.Police && a.role !== Role.Fire && a.unit < 0;
         tx = Math.cos(a.face) + (r() - 0.5) * 0.3;
         ty = Math.sin(a.face) + (r() - 0.5) * 0.3;
-        speed = a.role === Role.Police ? 0 : SPEED.walk + (SPEED.run - SPEED.walk) * a.fear;
+        speed = !wander ? 0 : SPEED.walk + (SPEED.run - SPEED.walk) * a.fear;
       }
     } else {
       // The dead.
@@ -1700,7 +1732,7 @@ export function leaveStreet(s: Street, world: World): void {
       world.moving[i] = 0;
     }
   for (const a of s.agents) {
-    if (a.gone) continue;
+    if (a.gone || (a.unit >= 0 && a.kind === Kind.Living)) continue; // crews go back to their vehicle (session)
     const i = Math.floor(a.y) * world.width + Math.floor(a.x);
     if (a.kind === Kind.Living) {
       // The bitten count as the dead now: they will turn soon anyway.

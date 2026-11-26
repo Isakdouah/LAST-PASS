@@ -314,3 +314,110 @@ export function nearAsphalt(net: RoadNet, x: number, y: number, margin = 0): boo
     }
   return false;
 }
+
+/**
+ * Shortest drive between two points along the road network (A*, junction to junction),
+ * as a line of points in map cells that stays on the roads. Roads under buildings are
+ * avoided. Returns [] when either end is far from any road or no way exists.
+ */
+export function roadRoute(net: RoadNet, a: { x: number; y: number }, b: { x: number; y: number }): { x: number; y: number }[] {
+  const ha = nearestRoad(net, a.x, a.y, 4), hb = nearestRoad(net, b.x, b.y, 4);
+  if (!ha || !hb) return [];
+  const N = net.nodeX.length;
+  const g = new Float64Array(N).fill(Infinity);
+  const via = new Int32Array(N).fill(-1); // edge used to reach each node
+  const done = new Uint8Array(N);
+  const heap: number[] = [], prio: number[] = [];
+  const push = (i: number, p: number) => {
+    heap.push(i), prio.push(p);
+    let k = heap.length - 1;
+    while (k > 0) {
+      const u = (k - 1) >> 1;
+      if (prio[u] <= prio[k]) break;
+      [heap[u], heap[k]] = [heap[k], heap[u]];
+      [prio[u], prio[k]] = [prio[k], prio[u]];
+      k = u;
+    }
+  };
+  const pop = () => {
+    const top = heap[0];
+    const li = heap.pop()!, lp = prio.pop()!;
+    if (heap.length) {
+      heap[0] = li;
+      prio[0] = lp;
+      let k = 0;
+      for (;;) {
+        const l = 2 * k + 1, r = l + 1;
+        let m = k;
+        if (l < heap.length && prio[l] < prio[m]) m = l;
+        if (r < heap.length && prio[r] < prio[m]) m = r;
+        if (m === k) break;
+        [heap[m], heap[k]] = [heap[k], heap[m]];
+        [prio[m], prio[k]] = [prio[k], prio[m]];
+        k = m;
+      }
+    }
+    return top;
+  };
+  const M = net.M;
+  const hx = net.nodeX, hy = net.nodeY;
+  const h = (i: number) => Math.hypot(hx[i] - b.x, hy[i] - b.y) * M;
+  // Start: both ends of the starting edge.
+  const sa = net.ea[ha.edge], sb = net.eb[ha.edge];
+  g[sa] = ha.along;
+  g[sb] = net.elen[ha.edge] - ha.along;
+  push(sa, g[sa] + h(sa));
+  push(sb, g[sb] + h(sb));
+  const ta = net.ea[hb.edge], tb = net.eb[hb.edge];
+  let end = -1;
+  let guard = 0;
+  while (heap.length && guard++ < 400000) {
+    const u = pop();
+    if (done[u]) continue;
+    done[u] = 1;
+    if (u === ta || u === tb) {
+      end = u;
+      break;
+    }
+    for (const e of net.adj[u]) {
+      if (net.covered[e]) continue;
+      const v = net.ea[e] === u ? net.eb[e] : net.ea[e];
+      const nd = g[u] + net.elen[e];
+      if (nd < g[v]) {
+        g[v] = nd;
+        via[v] = e;
+        push(v, nd + h(v));
+      }
+    }
+  }
+  if (end < 0) return [];
+  // Walk back: the edges from the start edge to the end node, then along the last edge.
+  const edges: { e: number; from: number }[] = [];
+  for (let v = end; via[v] >= 0; ) {
+    const e = via[v];
+    const u = net.ea[e] === v ? net.eb[e] : net.ea[e];
+    edges.push({ e, from: u });
+    v = u;
+    if (edges.length > 100000) break;
+  }
+  edges.reverse();
+  const out: { x: number; y: number }[] = [];
+  const p: RoadPoint = { x: 0, y: 0, tx: 1, ty: 0 };
+  const along = (e: number, from: number, to: number) => {
+    // Points of edge e from `from` metres to `to` metres (either direction).
+    const o = net.eoff[e], n = net.eoff[e + 1] - o;
+    pointAt(net, e, from, p);
+    out.push({ x: p.x, y: p.y });
+    if (to > from) {
+      for (let j = 0; j < n; j++) if (net.cum[o + j] > from && net.cum[o + j] < to) out.push({ x: net.pts[(o + j) * 2], y: net.pts[(o + j) * 2 + 1] });
+    } else for (let j = n - 1; j >= 0; j--) if (net.cum[o + j] < from && net.cum[o + j] > to) out.push({ x: net.pts[(o + j) * 2], y: net.pts[(o + j) * 2 + 1] });
+    pointAt(net, e, to, p);
+    out.push({ x: p.x, y: p.y });
+  };
+  // From the start point to the first junction.
+  const first = edges.length ? edges[0].from : end;
+  along(ha.edge, ha.along, first === net.ea[ha.edge] ? 0 : net.elen[ha.edge]);
+  for (const { e, from } of edges) along(e, from === net.ea[e] ? 0 : net.elen[e], from === net.ea[e] ? net.elen[e] : 0);
+  along(hb.edge, end === net.ea[hb.edge] ? 0 : net.elen[hb.edge], hb.along);
+  return out;
+}

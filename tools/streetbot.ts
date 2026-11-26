@@ -26,10 +26,7 @@ function deepInside(x: number, y: number): boolean {
 function run(name: string, pick: (g: Session) => { x: number; y: number }, passT: number, half = 4) {
   const g = new Session(quiet);
   g.reset('play');
-  while (g.t < passT) {
-    g.t += 60;
-    g.cityStep();
-  }
+  while (g.t < passT) g.skipMinute();
   const f = pick(g);
   const box = { x0: f.x - half, y0: f.y - half, x1: f.x + half, y1: f.y + half };
   g.setZone(box);

@@ -11,9 +11,11 @@ export const SIZE = {
   pickup: { l: 4.9, w: 1.75, h: 1.7 }, // a 1997 compact pickup
   bus: { l: 12.2, w: 2.6, h: 3.1 }, // a 40-foot city bus
   ambulance: { l: 6.4, w: 2.4, h: 2.8 }, // a box ambulance
+  squad: { l: 5.2, w: 1.9, h: 1.5 }, // a full-size police sedan (2009 fleets: Crown Victoria class)
+  engine: { l: 10.5, w: 2.5, h: 3.1 }, // a pumper fire engine
 };
 export const VEHICLE_SCALE = 1.5;
-export type VKind = 'car' | 'pickup' | 'bus' | 'ambulance';
+export type VKind = 'car' | 'pickup' | 'bus' | 'ambulance' | 'squad' | 'engine';
 
 const glass = 0x10141c;
 /** Box with simple top light baked into vertex colours (top bright, sides darker, bottom dark). */
@@ -123,6 +125,25 @@ export function vehicleGeometry(kind: VKind, col: number, style = 0): THREE.Buff
     parts.push(box(s.w - 0.6, 0.25, 0.1, 0, 2.78, s.l / 2 + 0.02, 0xf0c83c)); // route sign
     parts.push(box(s.w * 0.6, 0.3, 2.2, 0, s.h + 0.15, -1, 0x9a9a96)); // roof unit
     wheels(s.l * 0.3, -s.l * 0.22);
+  } else if (kind === 'squad') {
+    // Placeholder livery (white with a dark door band), not a copy of any real department's.
+    const w = s.w, l = s.l;
+    parts.push(box(w, 0.66, l, 0, 0.53, 0, 0xe8e8e4));
+    parts.push(box(w + 0.02, 0.3, l * 0.5, 0, 0.62, 0, 0x1c2640)); // door band
+    cabin(parts, w - 0.18, 0.86, 1.45, l * 0.12, -l * 0.3, 0xe8e8e4, 1);
+    carDetails(parts, w, l, 0.68, l * 0.12 - 0.1, 0.98, 0xe8e8e4);
+    parts.push(box(1.2, 0.14, 0.3, 0, 1.52, -0.1, 0x30303a)); // light bar base (the lights flash on top)
+    wheels(l * 0.32, -l * 0.32);
+  } else if (kind === 'engine') {
+    const red = 0xb01a12;
+    parts.push(box(s.w, 1.9, 2.6, 0, 1.45, s.l / 2 - 1.3, red)); // cab
+    parts.push(box(s.w - 0.2, 0.7, 0.08, 0, 1.9, s.l / 2, glass)); // windscreen
+    parts.push(box(s.w, 1.7, s.l - 2.8, 0, 1.25, -1.4, red)); // body with lockers
+    parts.push(box(s.w + 0.02, 0.12, s.l - 0.4, 0, 1.05, -0.2, 0xe8e4d0)); // reflective stripe
+    parts.push(box(s.w - 0.6, 0.35, s.l - 4, 0, 2.3, -1.6, 0x9a9a9e)); // hose bed / ladder rack
+    parts.push(box(0.5, 0.08, s.l - 3.6, 0.55, 2.55, -1.6, 0xb8b8bc)); // ground ladder
+    parts.push(box(s.w - 0.3, 0.18, 0.3, 0, 2.48, s.l / 2 - 0.6, 0x30303a)); // light bar base
+    wheels(s.l * 0.36, -s.l * 0.3, 0.5);
   } else {
     parts.push(box(s.w - 0.2, 1.3, 2.2, 0, 1.0, s.l / 2 - 1.1, col)); // cab
     parts.push(box(s.w, s.h - 0.35, s.l - 2.0, 0, 0.35 + (s.h - 0.35) / 2, -1.0, col)); // box

@@ -3,7 +3,7 @@
 // the ground, the bitten shaking, the new dead getting up. Further out they stay the
 // simple one-piece figures. The pose only shows what the simulation decided.
 import * as THREE from 'three';
-import { Agent, Kind, Role } from '../sim/street';
+import { Agent, Gun, Kind, Role, WEAPONS } from '../sim/street';
 import { litBasic } from './lightfield';
 
 const RISE = 1.2; // keep in step with street.ts
@@ -226,7 +226,27 @@ function partGeo(w: number, l: number, d: number, y0: number, z0 = 0): THREE.Buf
 }
 
 /** Part numbers. */
-const P = { torso: 0, hips: 1, head: 2, hair: 3, upL: 4, upR: 5, foreL: 6, foreR: 7, handL: 8, handR: 9, thighL: 10, thighR: 11, shinL: 12, shinR: 13, shoeL: 14, shoeR: 15 } as const;
+const P = { torso: 0, hips: 1, head: 2, hair: 3, upL: 4, upR: 5, foreL: 6, foreR: 7, handL: 8, handR: 9, thighL: 10, thighR: 11, shinL: 12, shinR: 13, shoeL: 14, shoeR: 15, item: 16 } as const;
+
+/** What is in the right hand: width, length, depth (m) and colour. Guns by type, then the
+ *  things people swing (by name in WEAPONS). Placeholder shapes: one box each. */
+const GUN_LOOK: Record<number, [number, number, number, number]> = {
+  [Gun.Handgun]: [0.04, 0.2, 0.11, 0x1a1a1c],
+  [Gun.Shotgun]: [0.05, 0.95, 0.07, 0x3a2a1e],
+  [Gun.Rifle]: [0.05, 1.05, 0.07, 0x4a3220],
+  [Gun.AR15]: [0.05, 0.85, 0.09, 0x141416],
+  [Gun.AK]: [0.05, 0.88, 0.09, 0x5a3018],
+};
+const SWING_LOOK: Record<string, [number, number, number, number]> = {
+  'kitchen knife': [0.025, 0.24, 0.03, 0xb8b8b8],
+  'baseball bat': [0.07, 0.8, 0.07, 0xc8a060],
+  'hockey stick': [0.04, 1.35, 0.07, 0x8a5a2a],
+  crowbar: [0.03, 0.75, 0.03, 0x7a1c14],
+  'frying pan': [0.22, 0.4, 0.04, 0x202020],
+  hammer: [0.04, 0.35, 0.05, 0x6a4a2a],
+  machete: [0.05, 0.6, 0.02, 0xa8a8a8],
+  'fire axe': [0.07, 0.9, 0.07, 0xc0201a],
+};
 
 const MAX = 500;
 export class Rig {
@@ -258,6 +278,7 @@ export class Rig {
     geos[P.thighL] = geos[P.thighR] = partGeo(0.16, THIGH, 0.18, -THIGH);
     geos[P.shinL] = geos[P.shinR] = partGeo(0.13, SHIN, 0.14, -SHIN);
     geos[P.shoeL] = geos[P.shoeR] = partGeo(0.12, 0.08, 0.27, -0.08, 0.05);
+    geos[P.item] = partGeo(1, 1, 1, -0.75); // scaled per person; held a quarter from its end
     this.meshes = geos.map((g) => {
       const im = new THREE.InstancedMesh(g, mat, MAX);
       im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -329,6 +350,7 @@ export class Rig {
     const style = h(u * 17); // < 0.2 beanie, < 0.42 long hair, < 0.47 bald, else short
     let hat = -1; // 0 beanie, 1 peaked cap
     if (a.role === Role.Police) sh.setHex(0x1c2640), pa.setHex(0x1c2640), so.setHex(0x101010), ha.setHex(0x1c2640), (hat = 1);
+    else if (a.role === Role.Fire) sh.setHex(0x8a7448), pa.setHex(0x8a7448), so.setHex(0x101010), ha.setHex(0x16161a), (hat = 0); // turnout gear, helmet
     else if (a.role === Role.Hunter) sh.setHex(0xe0601a), pa.setHex(PANTS[Math.floor(h(u * 7) * PANTS.length)]), ha.setHex(0xe0601a), (hat = 1);
     else {
       sh.setHex(SHIRT[Math.floor(h(u * 3) * SHIRT.length)]);
@@ -407,6 +429,17 @@ export class Rig {
       this.put(fo, this.m, fore);
       this.m.multiply(this.tmp.makeTranslation(0, -FORE, 0));
       this.put(hd, this.m, hand);
+      if (side === 1) {
+        // The thing in their hand: a gun, or whatever they swing. Along the forearm, so it
+        // points where they aim.
+        const look = a.kind === Kind.Living && a.turn < 0 ? (a.gun > 0 ? GUN_LOOK[a.gun] : SWING_LOOK[WEAPONS[a.weapon]?.name ?? '']) : undefined;
+        if (look) {
+          this.m.multiply(this.tmp.makeTranslation(0, -0.06, 0.02)).multiply(this.tmp2.makeScale(look[0], look[1], look[2]));
+          this.c.setHex(look[3]);
+          if (thermal) this.c.copy(thermal).multiplyScalar(0.35);
+          this.put(P.item, this.m, this.c);
+        } else this.put(P.item, this.m.makeScale(0, 0, 0), hand);
+      }
     }
     this.n++;
   }

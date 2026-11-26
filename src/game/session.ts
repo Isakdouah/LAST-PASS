@@ -17,10 +17,12 @@ import { enterStreet, equip, Kind, leaveStreet, newAgent, stepStreet, Street } f
 import type { Sound } from '../audio';
 import { eventsBetween, WorldEvent } from './world';
 import { agreeChance, bond, cellOf, cellsIn, createHeroStates, escapeChance, EXITS, heroById, HeroState, HEROES, leaveChance, pathPoint, routeCells, setRouter } from './heroes';
-import { nearestRoad, pointAt } from '../sim/roadnet';
+import { nearestRoad, pointAt, roadRoute } from '../sim/roadnet';
 import { createRumours, rumourById, rumourEffect, RumourState } from './rumours';
 import { Building, createBuilding, learnFloors, stepBuilding } from '../sim/building';
 import { rng } from '../sim/outbreak';
+import { createResponders, crewTotal, moveUnits, Responders, stepResponders, Unit } from './responders';
+import { Agent, AXE, M as CELL_M, pickGun, Role } from '../sim/street';
 
 export const TICK = 60; // game seconds per city-wide step (docs/tuning.md)
 export const MAX_AGENTS = 2500;
@@ -427,6 +429,8 @@ export class Session {
   nextTalk = 0;
   /** World news waiting to be heard, and the ones already heard (newest last). */
   heroes: HeroState[] = createHeroStates();
+  /** Squad cars, fire engines, ambulances (responders.ts). */
+  resp: Responders = { units: [], calls: [], radio: [] };
   /** Tests can fix the dice for close calls (0 = always escape, 1 = never). */
   luck: (() => number) | null = null;
   /** You saw one of the dead get back up after a body shot: proof that only the head counts. */
@@ -477,7 +481,8 @@ export class Session {
     this.proof = false;
     this.seenGetUps = 0;
     this.headcast = null;
-    this.startPop = count(this.world.healthy);
+    this.resp = createResponders(places, this.world);
+    this.startPop = count(this.world.healthy) + crewTotal(this.resp);
     const world = this.world;
     if (m === 'play') {
       // Scripted, not the player: patient zero came in on an organ transfer to HCMC this
@@ -539,6 +544,7 @@ export class Session {
 
   private syncStreetFirst() {
     if (this.street) {
+      this.pullCrews(true);
       leaveStreet(this.street, this.world);
       this.street = null;
     }
@@ -648,6 +654,10 @@ export class Session {
     const fighting = new Float32Array(w.fallen.length);
     for (let i = 0; i < fighting.length; i++) fighting[i] = w.fallen[i] - before[i];
     stepFires(this.fires, w, fighting, fireStations, this.tick * 13 + 5);
+    {
+      const st = this.street;
+      stepResponders(this.resp, w, this.fires, this.env().hour, this.tick * 977 + 3, (a, b) => roadRoute(roadNet(), a, b), (x, y) => !!st && x >= st.x0 && y >= st.y0 && x < st.x0 + st.w && y < st.y0 + st.h, (text) => this.dispatch(text));
+    }
     const statusBefore = this.radio.groups.map((g) => g.status);
     // Help that was sent drives along the streets, not through the river.
     for (const c of this.radio.convoys) if (!c.path) (c.path = streetPath({ x: c.x, y: c.y }, { x: c.to.x, y: c.to.y })), (c.at = 0);
@@ -710,6 +720,13 @@ export class Session {
     }
   }
 
+  /** Jump ahead one minute with nothing drawn (test bots, the dev jump). */
+  skipMinute() {
+    this.t += 60;
+    this.cityStep();
+    moveUnits(this.resp, 60);
+  }
+
   /** Keep individuals simulated inside `box` (map cells), or none when null. */
   setZone(box: Box | null) {
     if (!box) {
@@ -720,7 +737,7 @@ export class Session {
     const vw = box.x1 - box.x0, vh = box.y1 - box.y0;
     if (s && box.x0 >= s.x0 && box.y0 >= s.y0 && box.x1 <= s.x0 + s.w && box.y1 <= s.y0 + s.h && s.w * s.h <= (vw + 6) * (vh + 6) * 2.5)
       return;
-    if (s) leaveStreet(s, this.world);
+    if (s) this.pullCrews(true), leaveStreet(s, this.world);
     const mx = Math.ceil(vw * 0.3) + 1, my = Math.ceil(vh * 0.3) + 1;
     const x0 = Math.max(0, Math.floor(box.x0) - mx), y0 = Math.max(0, Math.floor(box.y0) - my);
     const x1 = Math.min(GW, Math.ceil(box.x1) + mx), y1 = Math.min(GH, Math.ceil(box.y1) + my);
@@ -1165,6 +1182,7 @@ export class Session {
     const gameDt = realDt * rate;
     if (this.mode === 'play') this.newsQueue.push(...eventsBetween(this.t, this.t + gameDt));
     this.t += gameDt;
+    moveUnits(this.resp, gameDt);
     // World news comes in one item at a time, so nothing scrolls past unread.
     if (this.newsQueue.length && now > this.nextNews && now > this.nextTalk) {
       const e = this.newsQueue.shift()!;
@@ -1236,6 +1254,8 @@ export class Session {
         this.stepMs = this.stepMs * 0.9 + (performance.now() - t0) * 0.1;
         this.drainExits(s);
       }
+      this.dropCrews();
+      this.pullCrews();
       if (this.streetAcc > STREET_DT) this.streetAcc = 0;
       this.streetAlpha = Math.min(1, this.streetAcc / STREET_DT);
     }
@@ -1282,12 +1302,83 @@ export class Session {
   }
 
   /** Living and turned, counting the individuals in the street zone. */
+  /** Dispatch radio: kept for the log; the odd line shown when it matters. */
+  private dispatch(text: string) {
+    this.resp.radio.push({ t: this.t, text });
+    if (this.resp.radio.length > 200) this.resp.radio.shift();
+    if (/home to|no answer/.test(text) && this.mode === 'play') this.say('Police radio', text, 7);
+  }
+
+  /**
+   * Crews in the street: when a vehicle is on scene inside the drawn area, its crew get out
+   * and are simulated one by one (police with their guns, firefighters with axes, medics).
+   * Their fate there is the crew's fate. `all` = everyone back in (the street is closing).
+   */
+  pullCrews(all = false) {
+    const s = this.street;
+    if (!s) return;
+    const byId = new Map(this.resp.units.map((u) => [u.id, u] as const));
+    const alive = new Map<number, Agent[]>();
+    for (const a of s.agents) if (a.unit >= 0 && a.kind === Kind.Living && a.turn < 0 && !a.gone) (alive.get(a.unit) ?? alive.set(a.unit, []).get(a.unit)!).push(a);
+    for (const u of this.resp.units) {
+      if (!u.inStreet.length) continue;
+      const list = alive.get(u.id) ?? [];
+      u.crew = list.length;
+      if (u.armed) u.ammo = list.reduce((n, a) => n + a.ammo, 0);
+      const inside = u.x >= s.x0 && u.y >= s.y0 && u.x < s.x0 + s.w && u.y < s.y0 + s.h;
+      if (all || u.state !== 'scene' || u.sceneT <= 0 || !inside) {
+        for (const a of list) a.gone = true; // back in the vehicle
+        u.inStreet = [];
+        if (u.crew <= 0) u.state = 'lost';
+      } else u.inStreet = list.map((a) => a.uid);
+      if (u.crew <= 0 && u.state !== 'lost') {
+        u.state = 'lost';
+        u.inStreet = [];
+        this.dispatch(`${u.label}, ${u.label}, respond... (no answer)`);
+      }
+    }
+    void byId;
+    s.agents = s.agents.filter((a) => !a.gone || a.unit < 0);
+  }
+
+  private dropCrews() {
+    const s = this.street;
+    if (!s) return;
+    for (const u of this.resp.units) {
+      if (u.state !== 'scene' || u.inStreet.length || u.crew <= 0 || u.sceneT <= 0) continue;
+      if (u.x < s.x0 || u.y < s.y0 || u.x >= s.x0 + s.w || u.y >= s.y0 + s.h) continue;
+      const r = Math.random;
+      const fx = Math.cos(u.face), fy = Math.sin(u.face);
+      for (let k = 0; k < u.crew; k++) {
+        // Out of the doors, either side of the vehicle.
+        const side = k % 2 ? 1 : -1, back = (Math.floor(k / 2) - 0.5) * 3;
+        let x = u.x + (-fy * side * 2.4 - fx * back) / CELL_M, y = u.y + (fx * side * 2.4 - fy * back) / CELL_M;
+        if (blocked(x, y) || wet(x, y)) [x, y] = outside(x, y, (px, py) => blocked(px, py) || wet(px, py));
+        const role = u.kind === 'police' ? Role.Police : u.kind === 'fire' ? Role.Fire : Role.Civilian;
+        const a = newAgent(x, y, Kind.Living, u.armed ? Math.max(1, Math.round(u.ammo / u.crew)) : 0, role);
+        if (u.armed) a.gun = pickGun(Role.Police, r);
+        if (u.kind === 'fire') (a.weapon = AXE), (a.skill = 0.3);
+        a.bold = u.kind === 'ems' ? 0.4 : 0.85 + r() * 0.15;
+        a.know = 0.2;
+        a.face = u.face;
+        a.unit = u.id;
+        s.agents.push(a);
+        u.inStreet.push(a.uid);
+      }
+    }
+  }
+
   totals() {
-    let alive = count(this.world.healthy);
+    let alive = count(this.world.healthy) + crewTotal(this.resp);
     let dead = count(this.world.infected);
     const s = this.street;
     if (s) {
       for (const a of s.agents) {
+        if (a.unit >= 0 && a.kind === Kind.Living) continue; // counted with their vehicle
+        if (a.unit >= 0) {
+          if (a.kind === Kind.Dead) dead += 1;
+          continue;
+        }
         if (a.kind === Kind.Living) alive += s.scale;
         if (a.kind === Kind.Dead) dead += s.scale;
       }

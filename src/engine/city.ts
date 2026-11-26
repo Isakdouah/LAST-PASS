@@ -18,7 +18,7 @@ import { heightAt, lifted, terrainUniforms, TERRAIN_PARS } from './terrain';
 import { addHouse, box as hbox, Buf, fitHouse, K as HK } from './houses';
 import { query, Shapes, TILE } from '../map/detail';
 import { Kind, Role, Street } from '../sim/street';
-import { asleepShare } from '../sim/outbreak';
+import { asleepShare, outsideShare } from '../sim/outbreak';
 import { drizzle } from '../game/weather';
 
 const HALF_W = (GW * CELL_X) / 2;
@@ -50,7 +50,7 @@ void main() {
 const GROUND_F = /* glsl */ `${LOG_F}
 uniform sampler2D map; uniform sampler2D over; uniform sampler2D overS;
 uniform vec2 grid; uniform vec2 cellM; uniform float time; uniform float alpha; uniform float dots; uniform float thermal;
-uniform float edgeFade;
+uniform float edgeFade; uniform float deadView;
 varying vec2 vUv; varying vec3 vW; varying float vTy;
 ${TERRAIN_PARS}
 ${HASH}
@@ -128,6 +128,17 @@ void main() {
     if (h < pDead) { dc = vec3(0.44, 0.86, 0.31); a = 1.0; }
     else if (h2 < pLive) { dc = vec3(0.88, 0.88, 0.84); a = 1.0; }
     col = mix(col, dc, inDot * a * dots);
+  }
+  // The spread, from high up: the dead as a green stain over the blocks they hold, brighter
+  // where there are more of them, broken into a coarse shimmer so it reads as a crowd moving.
+  if (deadView > 0.01 && thermal < 0.5) {
+    float zn = os.g * 127.5; // the dead in this cell (smoothed)
+    float a = clamp(sqrt(zn / 50.0), 0.0, 0.9);
+    vec2 sp = floor(cp * 2.0);
+    float sh = step(0.35, h21(sp + floor(time * 3.0 + h21(sp) * 3.0)));
+    a *= 0.55 + 0.45 * sh;
+    a = floor(a * 4.0 + 0.5) / 4.0; // hard steps, no smooth gradient (art rules)
+    col = mix(col, vec3(0.38, 0.95, 0.27), a * deadView * step(0.4, zn));
   }
   if (thermal > 0.5) {
     col = vec3(0.06) + vec3(0.25) * f;
@@ -500,6 +511,9 @@ export class CityLayer {
   /** Lit head- and taillights of cars on the move. */
   private carLights: THREE.InstancedMesh;
   private heroVeh = new Map<string, THREE.Mesh>();
+  /** Squad cars, fire engines, ambulances (responders.ts), and their flashing light bars. */
+  private unitIM = new Map<string, THREE.InstancedMesh>();
+  private unitLights!: THREE.InstancedMesh;
   private heroFig = new Map<string, THREE.Mesh>();
   private selBox: THREE.LineSegments;
   /** The hero whose ID card is open (gets a thin box round them). */
@@ -539,6 +553,7 @@ export class CityLayer {
       cellM: { value: new THREE.Vector2(CELL_X, CELL_Y) },
       time: { value: 0 },
       thermal: { value: 0 },
+      deadView: { value: 0 },
       ...terrainUniforms(HALF_W, HALF_H),
     };
     // Whole-city ground picture, about 10 m per pixel.
@@ -601,6 +616,24 @@ export class CityLayer {
     this.carLights.renderOrder = 0.65;
     this.carLights.count = 0;
     this.scene.add(this.carLights);
+    // Responders: one instanced shape per kind, plus flashing lights on top.
+    for (const [kind, vk, col] of [['police', 'squad', 0xffffff], ['fire', 'engine', 0xffffff], ['ems', 'ambulance', 0xf4f2ea]] as const) {
+      const im = new THREE.InstancedMesh(vehicleGeometry(vk, col), vehicleMat, 120);
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(120 * 3).fill(1), 3);
+      im.frustumCulled = false;
+      im.renderOrder = 0.6;
+      im.count = 0;
+      this.scene.add(im);
+      this.unitIM.set(kind, im);
+    }
+    this.unitLights = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), lifted(new THREE.MeshBasicMaterial({ color: 0xffffff }), this.shared), 600);
+    this.unitLights.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.unitLights.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(600 * 3), 3);
+    this.unitLights.frustumCulled = false;
+    this.unitLights.renderOrder = 0.7;
+    this.unitLights.count = 0;
+    this.scene.add(this.unitLights);
     // Heroes: their vehicle and themselves, and a thin selection box.
     for (const h of HEROES) {
       const v = new THREE.Mesh(vehicleGeometry(h.vehicle.kind, h.vehicle.colour), vehicleMat);
@@ -681,11 +714,13 @@ export class CityLayer {
   updateOverlay(s: Session) {
     const w = s.world, f = s.fires.fire, o = this.over;
     const asleep = asleepShare(s.env().hour);
+    const outside = outsideShare(s.env().hour);
     for (let i = 0; i < GW * GH; i++) {
       const j = i * 4;
       o[j] = Math.min(255, f[i] * 255);
       o[j + 1] = Math.min(255, w.infected[i] * 2);
-      o[j + 2] = Math.min(255, w.healthy[i] * 1.2);
+      // Living dots: only people outside (indoors you would not see them).
+      o[j + 2] = Math.min(255, (w.healthy[i] * outside + w.moving[i]) * 1.2);
       // Alpha: 255 = power out; small values = how many windows are lit (people awake).
       const aware = w.aware[i];
       o[j + 3] = s.isDark(i) ? 255 : Math.round(45 * (1 - asleep * (1 - aware)));
@@ -708,7 +743,9 @@ export class CityLayer {
     this.frameNo++;
     this.shared.time.value = time;
     this.baseMat.uniforms.alpha.value = this.alpha;
-    const dots = THREE.MathUtils.clamp((6 - d) / 4, 0, 1);
+    // White dots (people outside) only fairly close; from higher up, the green spread.
+    const dots = THREE.MathUtils.clamp((2.5 - d) / 1.5, 0, 1);
+    this.shared.deadView.value = THREE.MathUtils.smoothstep(d, 1.0, 2.5);
     this.baseMat.uniforms.dots.value = dots;
     // Near tiles: sharper ground and real buildings within a radius that grows with height.
     const near = d < 7;
@@ -803,6 +840,7 @@ export class CityLayer {
     this.updateStreet(s.street, time, look, d);
     this.updateCanopy(s);
     this.updateHeroes(s, d, time);
+    this.updateUnits(s, d, time);
     this.updateRoute(s, d, time);
     this.updatePoints(s, look, d, time);
     this.ptsMat.uniforms.scale.value = screenH / (2 * Math.tan(THREE.MathUtils.degToRad(fovDeg) / 2));
@@ -849,6 +887,56 @@ export class CityLayer {
     }
     this.routeLine.geometry.setDrawRange(0, n * 2);
     pos.needsUpdate = true;
+  }
+
+  /** Responders on the streets: the vehicle, and its lights flashing while it is working. */
+  private updateUnits(s: Session, d: number, time: number) {
+    const close = d < 6 && this.alpha > 0.3;
+    const counts = new Map<string, number>();
+    const L = this.unitLights;
+    let nl = 0;
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), sc = new THREE.Vector3(VEHICLE_SCALE, VEHICLE_SCALE, VEHICLE_SCALE);
+    const up = new THREE.Vector3(0, 1, 0);
+    const c = new THREE.Color();
+    if (close)
+      for (const u of s.resp.units) {
+        if (u.state === 'lost' && u.crew > 0) continue;
+        const im = this.unitIM.get(u.kind)!;
+        const k = counts.get(u.kind) ?? 0;
+        if (k >= 120) continue;
+        cellToLocal(u.x, u.y, v);
+        // Model faces +z (south); angle is from +x (east) toward +y (south).
+        q.setFromAxisAngle(up, Math.PI / 2 - u.face);
+        m.compose(v, q, sc);
+        im.setMatrixAt(k, m);
+        // A lost unit stays where it stopped, dark.
+        im.setColorAt(k, c.setScalar(u.state === 'lost' ? 0.45 : 1));
+        counts.set(u.kind, k + 1);
+        const working = u.state === 'out' || u.state === 'scene' || u.state === 'back';
+        if (!working || nl > 590) continue;
+        // Two lamps on the bar, alternating (police red/blue; fire and medics red/white).
+        const top = u.kind === 'fire' ? 2.6 : u.kind === 'ems' ? 2.95 : 1.62;
+        const fwd = u.kind === 'fire' ? 4.6 : u.kind === 'ems' ? 2.6 : -0.1;
+        const phase = Math.floor(time * 6 + u.id) % 2;
+        for (const side of [-1, 1]) {
+          const on = (side < 0) === (phase === 0);
+          const off = new THREE.Vector3(side * 0.35, top, fwd).applyQuaternion(q).multiplyScalar(VEHICLE_SCALE).add(v);
+          m.compose(off, q, new THREE.Vector3(0.5, 0.25, 0.35).multiplyScalar(VEHICLE_SCALE));
+          L.setMatrixAt(nl, m);
+          if (u.kind === 'police') c.setHex(side < 0 ? 0xff2018 : 0x2a50ff);
+          else c.setHex(side < 0 ? 0xff2018 : 0xfff4e0);
+          if (!on) c.multiplyScalar(0.15);
+          L.setColorAt(nl++, c);
+        }
+      }
+    for (const [kind, im] of this.unitIM) {
+      im.count = counts.get(kind) ?? 0;
+      im.instanceMatrix.needsUpdate = true;
+      if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    }
+    L.count = nl;
+    L.instanceMatrix.needsUpdate = true;
+    if (L.instanceColor) L.instanceColor.needsUpdate = true;
   }
 
   private updateHeroes(s: Session, d: number, time: number) {

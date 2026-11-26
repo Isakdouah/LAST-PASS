@@ -1023,8 +1023,7 @@ setTimeout(() => roadNet(), 800);
   jump: (seconds: number) => {
     game.setZone(null);
     while (game.t < seconds) {
-      game.t += 60;
-      game.cityStep();
+      game.skipMinute();
     }
     game.wasWindow = inWindow(game.t);
   },
