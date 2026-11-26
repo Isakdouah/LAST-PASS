@@ -9,6 +9,8 @@ export interface MapFile {
   credit: string;
   layers: Record<'land' | 'roadMajor' | 'roadMinor' | 'bridge' | 'buildings', string>;
   population: string;
+  /** Where the head count comes from (shown on screen). */
+  populationCredit?: string;
   places: [number, number, string][];
 }
 

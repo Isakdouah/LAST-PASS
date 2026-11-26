@@ -528,7 +528,7 @@ function titleText() {
     <div>You can look, listen, speak and connect people.</div><br>
     <div class="mark">[Enter] begin</div><br>
     <div class="small">Headphones on. Rough draft 11: names, voices and lines are placeholders.<br>
-    Map data © OpenStreetMap contributors (ODbL). Place names and city lights: GeoNames (CC BY 4.0). Terrain: 3DEP, GMTED2010 and SRTM courtesy of the U.S. Geological Survey; ETOPO1 from NOAA (via AWS Terrain Tiles). Numbers are estimates.</div>`;
+    Map data © OpenStreetMap contributors (ODbL). Place names and city lights: GeoNames (CC BY 4.0). Population: U.S. Census Bureau, 2010 Census (block counts). Terrain: 3DEP, GMTED2010 and SRTM courtesy of the U.S. Geological Survey; ETOPO1 from NOAA (via AWS Terrain Tiles). Numbers are estimates.</div>`;
 }
 function endText() {
   const { alive, dead, fallen } = game.totals();

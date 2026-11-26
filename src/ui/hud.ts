@@ -36,7 +36,7 @@ export class Hud {
     this.keys = mk('keys');
     this.credit = mk('credit');
     this.fps = mk('fps', '');
-    this.credit.innerHTML = 'Map data © OpenStreetMap contributors (ODbL) · place names + city lights: GeoNames (CC BY 4.0) · terrain: USGS 3DEP, NOAA ETOPO1 (AWS Terrain Tiles)';
+    this.credit.innerHTML = 'Map data © OpenStreetMap contributors (ODbL) · place names + city lights: GeoNames (CC BY 4.0) · population: U.S. Census Bureau, 2010 Census · terrain: USGS 3DEP, NOAA ETOPO1 (AWS Terrain Tiles)';
     this.screen = document.createElement('div');
     this.screen.id = 'screenText';
     document.body.appendChild(this.screen);

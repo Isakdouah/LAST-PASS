@@ -3,6 +3,7 @@
 Written 20 Nov 2026 for plan v2. (data) = from a source below; (guess) = ours, to tune by playtest.
 
 ## Where people are
+- Head count per 80 m cell (data, 26 Nov 2026): real 2010 Census block counts (POP10), 979,374 people in the map box from 12,671 blocks; built by `tools/build_population.py`. Inside each block, people lean toward cells with buildings and never sit on water (guess). Replaces the old 800,000 guess spread evenly over house roofs. Source checked: file totals match Hennepin 1,152,425 and Ramsey 508,640 (2010).
 - Share asleep by hour: BLS American Time Use Survey Table A-3 (2021), all days; shifted one hour later for a Friday (guess). About 7% asleep at 8 PM, 70% at 11 PM, 95% at 2-3 AM (data).
 - Outside on a cold October evening: 1.5-8.5% (guess). Everyone else is indoors and not drawn until their street goes into chaos.
 - Weather: NWS Twin Cities October 2009 table (via search summary): high ~7 C, low ~3 C, 0.04 in precipitation. Drizzle hours are a guess.
@@ -40,6 +41,7 @@ Knowing to go for the head multiplies the kill chance by 2.5.
 - The bitten turn after 20-90 s (guess) and may hide it. In the last 25 s they show signs (grey-green), and a scared armed person nearby may shoot them.
 
 ## Sources
+- U.S. Census Bureau, 2010 Census, TIGER/Line blocks with population and housing (TIGER2010BLKPOPHU, Minnesota): https://www2.census.gov/geo/tiger/TIGER2010BLKPOPHU/ (public domain)
 - RAND (2008), Evaluation of the NYPD Firearm Training and Firearm-Discharge Review Process: https://www.rand.org/pubs/research_briefs/RB9359.html
 - PolitiFact (25 May 2018), police hit rates 22-52%: https://www.politifact.com/factchecks/2018/may/25/shannon-watts/do-more-7-10-police-bullets-miss-their-mark-gun-co
 - BLS ATUS Table A-3 (2021): https://www.bls.gov/tus/tables/a3-2021.htm
