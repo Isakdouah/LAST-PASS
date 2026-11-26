@@ -240,8 +240,18 @@ export function stepResponders(
           if (fires.fire[i] <= 0.05) (u.fires++, (u.sceneT = Math.min(u.sceneT, 0)));
         }
       }
+      // Too many of them: most crews get back in and pull out (training: don't die in place).
+      if (z > u.crew * 4 + w.healthy[i] * 0.5 && r() < 0.6) {
+        const p = route({ x: u.x, y: u.y }, u.home);
+        u.path = p.length >= 2 ? p : [{ x: u.x, y: u.y }, u.home];
+        u.along = 0;
+        u.state = 'back';
+        u.target = null;
+        say(`${u.label}: "Too many, we're falling back to ${u.base}."`);
+        continue;
+      }
       // The crew can be caught: more of the dead around, more risk.
-      const risk = Math.min(0.5, (z / (z + w.healthy[i] + u.crew * 4 + 1)) * (u.kind === 'police' ? 0.25 : 0.45));
+      const risk = Math.min(0.3, (z / (z + w.healthy[i] + u.crew * 4 + 1)) * (u.kind === 'police' ? 0.08 : 0.12));
       for (let k = 0; k < u.crew; k++)
         if (r() < risk) {
           u.crew--;

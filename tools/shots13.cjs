@@ -48,6 +48,27 @@ const wait = (p, ms) => p.waitForTimeout(ms);
   await p.evaluate(([x, y]) => lastPass.lookCell(x, y, 0.08), [f.x, f.y]);
   await wait(p, 8000);
   await shot('g-front-close');
+  // A fire engine at work: later passes (fires start later in the night). Only in sight.
+  for (const t0 of [12040, 17560, 23080]) {
+    await p.evaluate((t) => lastPass.jump(t), t0);
+    const fu = await p.evaluate(() => {
+      const us = lastPass.game.resp.units.filter((q) => q.kind === 'fire' && (q.state === 'scene' || q.state === 'out'));
+      const v = us.find((q) => q.state === 'scene') || us[0];
+      return v ? { x: v.x, y: v.y, label: v.label, state: v.state } : null;
+    });
+    if (!fu) continue;
+    await p.evaluate(([x, y]) => lastPass.lookCell(x, y, 0.1), [fu.x, fu.y]);
+    await wait(p, 6000);
+    const at = await p.evaluate((label) => { const v = lastPass.game.resp.units.find((q) => q.label === label); return { x: v.x, y: v.y, state: v.state }; }, fu.label);
+    await p.evaluate(([x, y]) => lastPass.lookCell(x, y, 0.1), [at.x, at.y]);
+    await wait(p, 5000);
+    await shot('h-fire-engine');
+    await p.evaluate(([x, y]) => lastPass.lookCell(x, y, 0.04), [at.x, at.y]);
+    await wait(p, 6000);
+    await shot('i-firefighters-close');
+    console.log('fire', JSON.stringify({ t0, fu, at }));
+    break;
+  }
   const info = await p.evaluate(() => ({ fps: lastPass.fps && lastPass.fps(), units: lastPass.game.resp ? lastPass.game.resp.units.length : 0 }));
   fs.writeFileSync(`${out}/info.json`, JSON.stringify({ u, info, errors }, null, 1));
   console.log(JSON.stringify({ u, info, errors: errors.slice(0, 3) }));

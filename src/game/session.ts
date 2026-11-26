@@ -1303,10 +1303,15 @@ export class Session {
 
   /** Living and turned, counting the individuals in the street zone. */
   /** Dispatch radio: kept for the log; the odd line shown when it matters. */
+  private radioSaid = -1e9;
   private dispatch(text: string) {
     this.resp.radio.push({ t: this.t, text });
     if (this.resp.radio.length > 200) this.resp.radio.shift();
-    if (/home to|no answer/.test(text) && this.mode === 'play') this.say('Police radio', text, 7);
+    if (!/home to|no answer|falling back/.test(text) || this.mode !== 'play') return;
+    // Not every line: a busy night would bury the other voices.
+    if (/falling back/.test(text) && this.t - this.radioSaid < 180) return;
+    this.radioSaid = this.t;
+    this.say(/^Engine/.test(text) ? 'Fire radio' : /^Medic/.test(text) ? 'EMS radio' : 'Police radio', text, 7);
   }
 
   /**
