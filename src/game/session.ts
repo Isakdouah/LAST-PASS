@@ -57,7 +57,7 @@ const fireStations = places.filter((p) => p.kind === 'fire').map((p) => Math.flo
 /** Street step length (game seconds). */
 const STREET_DT = 1 / 15;
 const OCC = 8;
-const SUB = 8; // 8 x 8 small squares per edge square (1.25 m)
+const SUB = 16; // 16 x 16 small squares per edge square (0.6 m: nobody stands more than half a metre into a wall)
 const occ = (() => {
   const W = GW * OCC, H = GH * OCC;
   const out = new Uint8Array(W * H);

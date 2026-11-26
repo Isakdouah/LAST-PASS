@@ -12,6 +12,7 @@
 // Positions are in map cells (1 cell is about 79 m); speeds and ranges are set in metres
 // and seconds of game time, so the street looks right at any zoom.
 import { endNode, nearestRoad, pointAt, RoadNet, RoadPoint } from './roadnet';
+import { at, buildNav, field, follow, Nav, sees, UNREACHED } from './nav';
 import { CAR_SHARE, EVENING, Env, headShare, hitChance, outsideShare, rng, SKILL, World } from './outbreak';
 
 export const enum Kind {
@@ -123,6 +124,14 @@ export interface Agent {
   gone: boolean;
   /** The living: passed over by the dead (see SPARED). */
   spared: boolean;
+  /** Seconds in a row they wanted to move but could not (for the test bot: should stay low). */
+  bump: number;
+  /** One of the dead they can see and shoot at (re-checked every few steps). */
+  aim: Agent | null;
+  /** Seconds left settled in a group (they stay put rather than shuffling in and out). */
+  rest: number;
+  /** Fight (> 0) or flight (< 0): seconds left before they think again. */
+  mind: number;
 }
 
 export interface Bullet {
@@ -175,6 +184,8 @@ export interface StreetStats {
   /** People who came out of buildings, and people caught inside. */
   cameOut: number;
   caughtInside: number;
+  /** Shots fired at something the shooter could not see (should be 0). */
+  blind: number;
 }
 
 export interface Exit {
@@ -225,6 +236,14 @@ export interface Street {
   /** Crashed and abandoned cars: they stay where they stopped and block the lane. */
   wrecks: Wreck[];
   stats: StreetStats;
+  /** Finding the way on foot (see nav.ts): the grid, and walking distance to the nearest
+   *  living person, the nearest of the dead, and somewhere safe. Rebuilt twice a second. */
+  nav?: Nav;
+  fLive?: Uint16Array;
+  fDead?: Uint16Array;
+  fSafe?: Uint16Array;
+  navT: number;
+  navK?: number;
 }
 
 export const M = 79; // metres per cell
@@ -246,6 +265,7 @@ const BODY_R = m(0.6); // a stray bullet passing this close to someone may hit t
 const STRAY_HIT = 0.35; // chance it does (one of the dead, coming at you)
 const STRAY_LIVING = 0.08; // people duck, run, stand behind the shooter (guess)
 const RALLY = m(300); // how far a scared person will run to reach someone armed
+const TURN_RATE = 6; // radians per second a walker or runner can turn
 const SWING = 0.9; // seconds between swings
 const LUNGE = m(4.5); // the dead leap from this far
 const LUNGE_T = 0.5; // seconds a lunge takes (you can see it coming)
@@ -261,7 +281,7 @@ export const PILE = { civ: 2, trained: 3 };
 export const SPARED = { share: 0.01, why: 'fever' };
 
 export function emptyStats(): StreetStats {
-  return { shots: 0, hits: 0, heads: 0, stray: 0, fights: 0, melee: 0, bites: 0, getUps: 0, grabs: 0, eaten: 0, freed: 0, rescues: 0, turned: 0, crawlers: 0, drove: 0, crashes: 0, abandoned: 0, cameOut: 0, caughtInside: 0 };
+  return { shots: 0, hits: 0, heads: 0, stray: 0, fights: 0, melee: 0, bites: 0, getUps: 0, grabs: 0, eaten: 0, freed: 0, rescues: 0, turned: 0, crawlers: 0, drove: 0, crashes: 0, abandoned: 0, cameOut: 0, caughtInside: 0, blind: 0 };
 }
 
 /** A new person or one of the dead. Old call shape kept: (x, y, kind, ammo, role). */
@@ -311,6 +331,10 @@ export function newAgent(x: number, y: number, kind: Kind, ammo = 0, role = Role
     think: 0,
     gone: false,
     spared: false,
+    bump: 0,
+    aim: null,
+    rest: 0,
+    mind: 0,
   };
 }
 
@@ -355,6 +379,7 @@ export function newStreet(x0: number, y0: number, w: number, h: number, scale = 
     exits: [],
     wrecks: [],
     stats: emptyStats(),
+    navT: 0,
   };
 }
 
@@ -538,6 +563,45 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     return cx >= 0 && cy >= 0 && cx < world.width && cy < world.height ? world.calm[cy * world.width + cx] : 0;
   };
   const trained = (p: Agent) => p.role === Role.Police || p.role === Role.Soldier;
+
+  // ---- Finding the way on foot (nav.ts) ----
+  // One field is refreshed each sixth of a second, in turn: toward the living (the dead
+  // follow it), toward the dead (police close in on it, the scared run up it), toward
+  // safety (people with guns, avoiding the dead).
+  if (!s.nav) s.nav = buildNav(s.x0, s.y0, s.w, s.h, M, (x, y) => blocked(x, y) || wet(x, y));
+  const nav = s.nav;
+  const sqM = nav.res * M; // metres per square
+  s.navT -= dt;
+  if (s.navT <= 0 || !s.fLive || !s.fDead) {
+    s.navT += 1 / 6;
+    if (s.navT <= 0) s.navT = 1 / 6;
+    const which = !s.fLive ? 0 : !s.fDead ? 1 : ((s.navK = ((s.navK ?? 0) + 1) % 3));
+    if (which === 0) s.fLive = field(nav, s.agents.filter((a) => a.kind === Kind.Living && !a.gone && a.car !== 1 && a.turn < 0 && !a.spared), (HUNT * M * 1.4) / sqM, undefined, s.fLive);
+    else if (which === 1) s.fDead = field(nav, s.agents.filter((a) => a.kind === Kind.Dead && !a.gone && a.down <= 0), (SEE * M * 1.4) / sqM, undefined, s.fDead);
+    else {
+      const guns = s.agents.filter((a) => a.kind === Kind.Living && !a.gone && a.car !== 1 && a.turn < 0 && a.ammo > 0 && a.held === 0);
+      if (!guns.length) s.fSafe = undefined;
+      else {
+        // Danger: squares within 25 m of the dead cost more to cross.
+        const fd = s.fDead!;
+        const danger = new Uint8Array(fd.length);
+        const near = 25 / sqM;
+        for (let j = 0; j < fd.length; j++) {
+          const d = fd[j] / 5;
+          if (d < near) danger[j] = Math.round(((near - d) / near) * 40);
+        }
+        s.fSafe = field(nav, guns, (RALLY * M) / sqM, danger, s.fSafe);
+      }
+    }
+  }
+  /** Walking metres from a to the nearest source of field f (Infinity if out of reach). */
+  const farM = (f: Uint16Array | undefined, a: { x: number; y: number }) => {
+    if (!f) return Infinity;
+    const v = at(nav, f, a.x, a.y);
+    return v === UNREACHED ? Infinity : (v / 5) * sqM;
+  };
+  const way = (f: Uint16Array | undefined, a: { x: number; y: number }, down = true) => (f ? follow(nav, f, a.x, a.y, down) : null);
+  const seen = (a: { x: number; y: number }, b: { x: number; y: number }) => sees(nav, a.x, a.y, b.x, b.y);
   /** Let go of p: every one of the dead holding them. */
   const release = (p: Agent) => {
     for (const o of s.agents) if (o.hold === p) o.hold = null;
@@ -565,6 +629,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     p.vx = p.vy = 0;
   };
   const fire = (a: Agent, target: Agent, aimAtLiving: boolean) => {
+    if (!seen(a, target)) st.blind++;
     const metres = Math.sqrt(d2(a, target)) * M;
     const p = hitChance({ skill: a.skill, dark: env.dark, fear: a.fear, metres, know: a.know });
     const hit = r() < p;
@@ -917,6 +982,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     let tx = 0;
     let ty = 0;
     let speed = 0; // metres per second
+    let wander = false; // just walking along (turns at walls instead of pushing at them)
     if (a.kind === Kind.Living) {
       // The bitten turn. Nobody can stop that.
       if (a.turn >= 0) {
@@ -1035,18 +1101,21 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         continue;
       }
 
+      const range = a.role === Role.Police ? RANGE.police : RANGE.civ;
       if (--a.think <= 0 || (a.tgt && a.tgt.kind !== Kind.Dead)) {
         a.tgt = nearest(a, isDead, SEE);
         a.think = 3 + Math.floor(r() * 3);
+        // Something to shoot at: the nearest one of the dead they can actually see.
+        a.aim = a.ammo > 0 && a.tgt ? nearest(a, (o) => isUp(o) && seen(a, o), range) : null;
       }
+      if (a.aim && (a.aim.kind !== Kind.Dead || a.aim.down > 0)) a.aim = null;
       const z = a.tgt;
       if (z) a.fear = Math.min(1, a.fear + 0.5);
       else a.fear = Math.max(0, a.fear - 0.03 * dt);
-      const range = a.role === Role.Police ? RANGE.police : RANGE.civ;
 
       // A friend in its grip, close by: pull it off or hit it (and risk being next).
       let helping = false;
-      if (!a.ammo && (a.bold > 0.8 || (a.weapon > 0 && a.bold > 0.6)) && countNear(a, isUp, m(10), 3) <= 1) {
+      if (!a.ammo && a.mind >= 0 && (a.bold > 0.8 || (a.weapon > 0 && a.bold > 0.6)) && (a.mind > 0 || countNear(a, isUp, m(10), 3) <= 1)) {
         const v = nearest(a, (o) => o.kind === Kind.Living && o.held > 0 && o.held < PILE.civ, m(6), a);
         if (v) {
           const z = s.agents.find((o) => o.hold === v);
@@ -1074,6 +1143,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
             if (speed > 0) {
               a.face = Math.atan2(ty, tx);
               helping = true;
+              a.mind = Math.max(a.mind, 1.5); // committed: goes in to help
             } else {
               a.vx = a.vy = 0;
               continue;
@@ -1084,7 +1154,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       // Fear of the bitten: someone near you shows the signs. A scared person with a gun
       // may shoot them. A calm voice on the radio makes it rarer.
       if (a.ammo > 0 && a.fear > 0.5 && a.turn < 0 && a.cooldown <= 0 && r() < 0.04 * dt * (1 - 0.8 * cellCalm(a))) {
-        const sick = nearest(a, showing, m(12), a);
+        const sick = nearest(a, (o) => showing(o) && seen(a, o), m(12), a);
         if (sick) {
           fire(a, sick, true);
           st.fights++;
@@ -1092,31 +1162,53 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         }
       }
 
+      // The way to the car: only if the kerb is in sight and the dead are not in between
+      // (otherwise they run like everyone else, and try again in a moment).
+      let carWay: { x: number; y: number; dist: number } | null = null;
+      if (a.car === 2 && z && net) {
+        const h = nearestRoad(net, a.x, a.y, m(30));
+        if (!h) a.car = 0;
+        else {
+          pointAt(net, h.edge, h.along, pa);
+          const rx = pa.x - a.x, ry = pa.y - a.y, rl = Math.hypot(rx, ry) || 1;
+          const zx = z.x - a.x, zy = z.y - a.y, zl = Math.hypot(zx, zy) || 1;
+          const towardDead = (rx * zx + ry * zy) / (rl * zl);
+          // Once they go for it they keep going (a second and a half) unless one is right there.
+          const go = a.stuck > 0 ? !(towardDead > 0.5 && zl < m(5)) : !(towardDead > 0.3 && zl < m(25)) && seen(a, pa);
+          if (go) {
+            if (a.stuck <= 0) a.stuck = 1.5;
+            carWay = { x: rx / rl, y: ry / rl, dist: h.dist };
+          } else a.stuck = 0;
+          a.stuck = Math.max(0, a.stuck - dt);
+        }
+      }
       if (helping) {
         // On the way to help (direction set above).
-      } else if (a.ammo > 0 && z && d2(a, z) < range * range) {
-        // Stand and shoot.
-        a.face = Math.atan2(z.y - a.y, z.x - a.x);
-        if (a.cooldown <= 0) fire(a, z, false);
-      } else if (a.car === 2 && z && net) {
+      } else if (a.ammo > 0 && a.aim && d2(a, a.aim) < range * range) {
+        // Stand and shoot (only at what they can see: walls stop bullets).
+        const t = a.aim;
+        a.face = Math.atan2(t.y - a.y, t.x - a.x);
+        if (a.cooldown <= 0) {
+          if (seen(a, t)) fire(a, t, false);
+          else (a.aim = null), (a.think = 0);
+        }
+      } else if (carWay) {
+(a as any).br='CAR';
         // Getting to the car, parked at the kerb: run to the street, then drive off.
-        const h = nearestRoad(net, a.x, a.y, m(30));
-        if (!h) {
-          a.car = 0;
-        } else if (h.dist < m(4) && r() < 1.5 * dt) {
+(a as any).br='CARK';
+        if (carWay.dist < m(4) && r() < 1.5 * dt) {
           a.car = 1;
           a.road = -1;
           drive(a);
           continue;
-        } else {
-          pointAt(net, h.edge, h.along, pa);
-          const rl = h.dist || 1;
-          const zl = Math.sqrt(d2(a, z)) || 1;
-          tx = (pa.x - a.x) / rl + ((a.x - z.x) / zl) * 0.4;
-          ty = (pa.y - a.y) / rl + ((a.y - z.y) / zl) * 0.4;
-          speed = SPEED.run;
         }
-      } else if (a.car === 2 && z) {
+        // At the kerb: stop and fumble with the keys (no running back and forth).
+        if (carWay.dist >= m(4)) {
+          tx = carWay.x;
+          ty = carWay.y;
+          speed = SPEED.run;
+        } else a.face = Math.atan2(carWay.y, carWay.x);
+      } else if (a.car === 2 && z && !net) {
         // Getting to the car: on a road now? Then drive.
         if (onRoad(a.x, a.y) && r() < 0.5 * dt) {
           a.car = 1;
@@ -1128,6 +1220,16 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         tx = a.x - z.x;
         ty = a.y - z.y;
         speed = SPEED.run;
+      } else if (z && a.ammo > 0 && (a.role !== Role.Civilian || a.bold > 0.6) && a.fear < 0.95 + (a.role !== Role.Civilian ? 1 : 0) && way(s.fDead, a)) {
+(a as any).br='APP';
+        // Police, hunters and the bold close in, round the buildings, until they have a
+        // clear shot (then they stop and shoot, above). Not straight at a wall.
+        const w = way(s.fDead, a)!;
+        if (farM(s.fDead, a) > m(12) * M) {
+          tx = w[0];
+          ty = w[1];
+          speed = SPEED.walk * 1.8;
+        } else a.face = Math.atan2(z.y - a.y, z.x - a.x);
       } else if (z && a.ammo > 0) {
         // Armed, the dead seen but not yet in range: hold, or close up with other guns.
         const g = nearest(a, (o) => isGun(o), m(40), a);
@@ -1141,11 +1243,20 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         }
         a.face = Math.atan2(z.y - a.y, z.x - a.x);
       } else if (z) {
+(a as any).br='Z';
         // The choice: fight with what they hold, run to a gun, run to the car, or just run.
-        const close = d2(a, z) < m(15) ** 2;
-        const few = close && countNear(a, isUp, m(15), 3) <= 2;
-        const friends = countNear(a, isLiving, m(10), 2) >= 1;
-        if (few && friends && a.weapon > 0 && a.bold > 0.55 && a.turn < 0) {
+        // Fight or flight: decided, then kept for a couple of seconds (no dithering).
+        if (a.mind > 0) a.mind = Math.max(0, a.mind - dt);
+        else if (a.mind < 0) a.mind = Math.min(0, a.mind + dt);
+        if (a.mind === 0) {
+          const close = d2(a, z) < m(15) ** 2;
+          const few = close && countNear(a, isUp, m(15), 3) <= 2;
+          const friends = countNear(a, isLiving, m(10), 2) >= 1;
+          a.mind = few && friends && a.weapon > 0 && a.bold > 0.55 ? 2 + r() * 2 : -(1.5 + r() * 2);
+        }
+        // A fighter gives up if the dead pile in.
+        if (a.mind > 0 && countNear(a, isUp, m(8), 4) >= 4) a.mind = -(2 + r());
+        if (a.mind > 0 && a.turn < 0) {
           // Fight: go at it. The swing happens on contact (below).
           tx = z.x - a.x;
           ty = z.y - a.y;
@@ -1167,23 +1278,30 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         } else if (a.hasCar && a.car === 0 && a.fear > 0.8 && r() < 0.6 * dt) {
           a.car = 2;
         } else {
-          // Run: toward someone armed if one is close and not past the dead, else away.
-          const g = nearest(a, isGun, RALLY, a);
-          if (g && (g.x - a.x) * (z.x - a.x) + (g.y - a.y) * (z.y - a.y) < 0) {
-            const gx = g.x + (g.x - z.x) * 0.08;
-            const gy = g.y + (g.y - z.y) * 0.08;
-            tx = gx - a.x;
-            ty = gy - a.y;
-            speed = tx * tx + ty * ty < m(2) ** 2 ? 0 : SPEED.run;
-          } else {
-            tx = a.x - z.x;
-            ty = a.y - z.y;
+          // Run: toward someone armed (the safest way round, avoiding the dead), else away
+          // from the dead along the streets (not into a wall).
+          const safe = farM(s.fSafe, a);
+          const w = safe < RALLY * M ? way(s.fSafe, a) : null;
+(a as any).br='RUN';
+          // There, or at the edge of the group gathered round them: stay put.
+          if (a.rest > 0 && d2(a, z) > m(8) ** 2) (a.rest -= dt), (speed = 0);
+          else if (safe < 2.5 || (safe < 15 && countNear(a, isLiving, m(1.6), 2) >= 2)) (speed = 0), (a.rest = 2 + r() * 2);
+          else if (w) {
+            tx = w[0];
+            ty = w[1];
             speed = SPEED.run;
+          } else {
+            const u = way(s.fDead, a, false);
+            if (u) (tx = u[0]), (ty = u[1]), (speed = SPEED.run);
+            else if (a.bump < 0.3) (tx = a.x - z.x), (ty = a.y - z.y), (speed = SPEED.run);
+            // Cornered (nowhere further from the dead): they freeze, or hide where they are.
           }
         }
       } else if (a.role !== Role.Police || a.fear < 0.5) {
-        tx = a.vx + (r() - 0.5) * 0.02;
-        ty = a.vy + (r() - 0.5) * 0.02;
+        // Walking along: keep the way they face, a little drift; turn at walls (below).
+        wander = a.role !== Role.Police;
+        tx = Math.cos(a.face) + (r() - 0.5) * 0.3;
+        ty = Math.sin(a.face) + (r() - 0.5) * 0.3;
         speed = a.role === Role.Police ? 0 : SPEED.walk + (SPEED.run - SPEED.walk) * a.fear;
       }
     } else {
@@ -1195,7 +1313,12 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       }
       if (--a.think <= 0 || (a.tgt && (a.tgt.kind !== Kind.Living || a.tgt.gone || a.tgt.turn >= 0 || a.tgt.held > 0))) {
         // Someone free first; one already held only if nobody else is near (that is a pile-on).
-        a.tgt = nearest(a, (o) => o.kind === Kind.Living && !o.gone && !o.spared && o.turn < 0 && o.held === 0, HUNT) ?? nearest(a, (o) => o.kind === Kind.Living && !o.gone && !o.spared && o.turn < 0, m(25));
+        const old = a.tgt && a.tgt.kind === Kind.Living && !a.tgt.gone && a.tgt.turn < 0 && a.tgt.held === 0 && (a.tgt.car !== 1 || d2(a, a.tgt) < m(25) ** 2) ? a.tgt : null;
+        // People on foot first (a car far off is not worth the chase); then anyone close by,
+        // a car or someone already held (that is a pile-on).
+        const cand = nearest(a, (o) => o.kind === Kind.Living && !o.gone && !o.spared && o.turn < 0 && o.held === 0 && o.car !== 1, HUNT) ?? nearest(a, (o) => o.kind === Kind.Living && !o.gone && !o.spared && o.turn < 0, m(25));
+        // Locked on: they only switch to someone clearly closer (no swinging between two).
+        a.tgt = old && cand && cand !== old && d2(a, cand) > 0.5 * d2(a, old) && d2(a, old) < HUNT * HUNT ? old : cand;
         a.think = 3 + Math.floor(r() * 3);
       }
       if (a.fresh >= 0) {
@@ -1236,7 +1359,23 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
         tx = p.x - a.x;
         ty = p.y - a.y;
         const dd = tx * tx + ty * ty;
-        if (!leap && !a.crawl && p.car !== 1 && dd < LUNGE * LUNGE && dd > BITE * BITE && a.cooldown <= 0) {
+        // Far, or round a corner: follow the streets toward the living (they pour round
+        // buildings like water). Close and in sight: straight at them.
+        if (!leap && (dd > m(20) ** 2 || a.bump > 0.2 || !seen(a, p))) {
+          const w = way(s.fLive, a);
+          if (w) {
+            // The way flips right round (someone else is now nearer the other way): keep
+            // going a moment first, so the swarm does not dither on the spot.
+            const hx = Math.cos(a.face), hy = Math.sin(a.face);
+            if (w[0] * hx + w[1] * hy < -0.3 && a.rest < 1 && a.bump <= 0) (a.rest += dt), (tx = hx), (ty = hy);
+            else {
+              if (w[0] * hx + w[1] * hy > 0) a.rest = 0;
+              tx = w[0];
+              ty = w[1];
+            }
+          }
+        }
+        if (!leap && !a.crawl && p.car !== 1 && dd < LUNGE * LUNGE && dd > BITE * BITE && a.cooldown <= 0 && seen(a, p)) {
           a.lunge = LUNGE_T; // crouch and leap
           a.cooldown = 1.5;
           leap = true;
@@ -1282,13 +1421,20 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
             best = n;
           }
         }
-        if (best) {
+        const w = way(s.fLive, a);
+        if (w) {
+          // Someone further off, round the buildings: the swarm finds them.
+          tx = w[0];
+          ty = w[1];
+          speed = fast * 0.8;
+        } else if (best) {
           tx = best.x - a.x;
           ty = best.y - a.y;
           speed = fast * 0.8;
         } else {
-          tx = a.vx + (r() - 0.5) * 0.04;
-          ty = a.vy + (r() - 0.5) * 0.04;
+          wander = true;
+          tx = Math.cos(a.face) + (r() - 0.5) * 0.4;
+          ty = Math.sin(a.face) + (r() - 0.5) * 0.4;
           speed = Math.min(fast, SPEED.walk * 1.3);
         }
       }
@@ -1298,10 +1444,21 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       a.vx = a.vy = 0;
       continue;
     }
+    // Bodies have weight: a person turns at most about a full turn a second, and slows
+    // to turn right round. No snapping back and forth from one step to the next.
+    let want = Math.atan2(ty, tx);
+    if (a.lunge <= 0) {
+      const cur = a.vx || a.vy ? Math.atan2(a.vy, a.vx) : a.face;
+      let dA = want - cur;
+      dA = Math.atan2(Math.sin(dA), Math.cos(dA));
+      const maxT = TURN_RATE * dt;
+      if (Math.abs(dA) > maxT) want = cur + Math.sign(dA) * maxT;
+      // Slow down into a sharp turn (to turn right round, nearly stop and pivot).
+      speed *= Math.max(0.12, Math.cos(Math.min(Math.abs(dA), Math.PI / 2) * 0.9));
+    }
     const step = m(speed) * dt;
-    const len = Math.hypot(tx, ty) || 1;
-    const vx = (tx / len) * step;
-    const vy = (ty / len) * step;
+    const vx = Math.cos(want) * step;
+    const vy = Math.sin(want) * step;
     const nx = a.x + vx;
     const ny = a.y + vy;
     const inBox = nx >= s.x0 && ny >= s.y0 && nx < s.x0 + s.w && ny < s.y0 + s.h;
@@ -1314,10 +1471,12 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
       if (free(nx, a.y)) (ok = true), (my = a.y);
       else if (free(a.x, ny)) (ok = true), (mx = a.x);
     }
+    let crowd = false;
     if (ok && a.car !== 1 && bumps(a, mx, my)) {
       // Someone in the way: step round them, or wait.
       ok = false;
-      for (const turn of [0.8, -0.8, 1.6, -1.6]) {
+      crowd = true;
+      for (const turn of [0.6, -0.6, 1.1, -1.1]) {
         const c = Math.cos(turn), sn = Math.sin(turn);
         const ux = vx * c - vy * sn, uy = vx * sn + vy * c;
         if (free(a.x + ux, a.y + uy) && !bumps(a, a.x + ux, a.y + uy)) {
@@ -1329,12 +1488,18 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
     if (ok) {
       a.x = mx;
       a.y = my;
+      // Remember the way they meant to go (not the sidestep): the next turn starts from it.
       a.vx = vx;
       a.vy = vy;
-      if (a.car !== 1 && Math.hypot(mx - a.px, my - a.py) > 1e-6) a.face = Math.atan2(vy, vx); // walkers face where they go
+      a.bump = 0;
+      if (a.car !== 1 && Math.hypot(mx - a.px, my - a.py) > 1e-6) a.face = want; // walkers face where they mean to go
     } else {
-      a.vx = (r() - 0.5) * step;
-      a.vy = (r() - 0.5) * step;
+      // Stopped by a wall or a crowd: stand still (no shaking on the spot). Someone just
+      // walking along turns away; anyone going somewhere finds the way round next step.
+      a.vx = a.vy = 0;
+      if (crowd) a.bump = Math.max(0, a.bump - dt);
+      else a.bump += dt;
+      if (wander) a.face += (r() < 0.5 ? 1 : -1) * (1.2 + r() * 1.2);
     }
   }
 
@@ -1362,7 +1527,7 @@ export function stepStreet(s: Street, world: World, seed: number, dt = 0.25, blo
               let d2 = rx * rx + ry * ry;
               if (d2 >= SEP * SEP) continue;
               if (d2 < 1e-6) (rx = r() - 0.5), (ry = r() - 0.5), (d2 = rx * rx + ry * ry);
-              const d = Math.sqrt(d2), push = (SEP - d) / 2;
+              const d = Math.sqrt(d2), push = (SEP - d) * 0.3; // gently: a hard shove each step makes crowds shiver
               nudge(a, (-rx / d) * push, (-ry / d) * push);
               nudge(o, (rx / d) * push, (ry / d) * push);
             }
