@@ -6,6 +6,7 @@ import mapFile from '../data/minneapolis.json';
 import detailFile from '../data/detail.json';
 import { outside } from '../sim/street';
 import { inWindow, localTime, nightOver, passIndex, PASSES, rateAt, realSeconds, untilWindow, fmt } from './clock';
+import { createHoldouts, Holdouts, insideDead, sheltered, stepHoldouts, KINDS, pressure as holdPressure } from './holdouts';
 import { createRadio, Group, nextLine, patch, Radio, stepRadio, tuned, warn, DIAL } from './radio';
 import { DetailFile, Detail, loadDetail, TILE } from '../map/detail';
 import { CityMap, loadMap, MapFile } from '../map/loadMap';
@@ -26,6 +27,8 @@ import { Agent, AXE, M as CELL_M, pickGun, Role } from '../sim/street';
 
 export const TICK = 60; // game seconds per city-wide step (docs/tuning.md)
 export const MAX_AGENTS = 2500;
+/** Things you can say on the radio per pass (ISAK, 26 Nov 2026: about 6). */
+export const AIR = 6;
 /** Metres per map cell, east-west and north-south (the grid is not quite square). */
 export const CELL_X = 78.7;
 export const CELL_Y = 81.3;
@@ -93,7 +96,7 @@ const occ = (() => {
       const jn = (j + 1) % n;
       const ax = s.xy[(o + j) * 2] * OCC, ay = s.xy[(o + j) * 2 + 1] * OCC;
       const bx = s.xy[(o + jn) * 2] * OCC, by = s.xy[(o + jn) * 2 + 1] * OCC;
-      const steps = Math.ceil(Math.hypot(bx - ax, by - ay) * 3) + 1;
+      const steps = Math.ceil(Math.hypot(bx - ax, by - ay) * 16) + 1; // fine enough not to skip a corner
       for (let t = 0; t <= steps; t++) {
         const X = Math.floor(ax + ((bx - ax) * t) / steps), Y = Math.floor(ay + ((by - ay) * t) / steps);
         if (X >= 0 && Y >= 0 && X < W && Y < H) out[Y * W + X] = 2;
@@ -141,9 +144,13 @@ export const blocked = (x: number, y: number) => {
     const list = sh.tiles.get(Math.floor(y0 / TILE) * 1000 + Math.floor(x0 / TILE)) ?? [];
     const near: number[] = [];
     for (const k of list) if (sh.meta[k] >= 4 && sh.box[k * 4] <= x1 && sh.box[k * 4 + 2] >= x0 && sh.box[k * 4 + 1] <= y1 && sh.box[k * 4 + 3] >= y0) near.push(k);
+    // A small square is wall if its centre or any corner is inside an outline: cracks
+    // narrower than half a metre between two buildings are closed, not walked through.
+    const PTS = [0.5, 0.5, 0.02, 0.02, 0.98, 0.02, 0.02, 0.98, 0.98, 0.98];
     for (let b = 0; b < SUB; b++)
-      for (let a = 0; a < SUB; a++) {
-        const px = (X + (a + 0.5) / SUB) / OCC, py = (Y + (b + 0.5) / SUB) / OCC;
+      for (let a = 0; a < SUB; a++)
+        for (let q = 0; q < PTS.length && !f[b * SUB + a]; q += 2) {
+        const px = (X + (a + PTS[q]) / SUB) / OCC, py = (Y + (b + PTS[q + 1]) / SUB) / OCC;
         for (const k of near) {
           const o = sh.off[k], n = sh.off[k + 1] - o;
           let inside = false;
@@ -422,6 +429,13 @@ export class Session {
   paused = false;
   sandboxRate = 6;
   startPop = 1;
+  /** Holdouts: where people gather to wait for daylight. */
+  holds!: Holdouts;
+  /** Air time: how many things you can say on the radio this pass (link and power budget). */
+  air = AIR;
+  private airPass = -1;
+  /** What happened at the holdouts (for the "since your last pass" report and dawn). */
+  holdLog: { t: number; id: number; text: string }[] = [];
   lossLog: string[] = [];
   smoke: Smoke[] = [];
   lastPhoto: Uint8Array | null = null;
@@ -482,6 +496,10 @@ export class Session {
     this.seenGetUps = 0;
     this.headcast = null;
     this.resp = createResponders(places, this.world);
+    this.holds = createHoldouts(places, this.world);
+    this.air = AIR;
+    this.airPass = -1;
+    this.holdLog = [];
     this.startPop = count(this.world.healthy) + crewTotal(this.resp);
     const world = this.world;
     if (m === 'play') {
@@ -553,6 +571,7 @@ export class Session {
     const { group, signal } = tuned(this.radio);
     if (!this.radioUp()) return this.say('', 'No line of sight. The radio only reaches Minneapolis during a pass.', 3);
     if (!group || signal < 0.75) return this.say('', 'Tune to someone first (arrow keys, or the wheel over the radio).', 3);
+    if (!this.spendAir()) return;
     this.syncStreetFirst();
     const refusedBefore = this.radio.stats.refused;
     let reply = warn(this.radio, this.world, group, this.tick, this.tick * 31 + 7);
@@ -580,6 +599,7 @@ export class Session {
       return this.say('', `Patch: holding ${group.name}. Tune to a second channel and press P again.`, 5);
     }
     const from = this.radio.patchFrom;
+    if (from !== group && !this.spendAir()) return;
     if (from !== group && this.heroState(from.id) && this.heroState(group.id)) {
       this.radio.patchFrom = null;
       this.linkSpeaker = group.id;
@@ -605,6 +625,7 @@ export class Session {
   doHeadcast() {
     if (!this.radioUp()) return this.say('', 'No line of sight. The radio only reaches Minneapolis during a pass.', 3);
     if (this.headcast && (this.headcast.proof || !this.proof)) return this.say('', 'You already told them. It is spreading, block by block.', 4);
+    if (!this.spendAir()) return;
     this.headcast = { tick: this.tick, proof: this.proof };
     for (const g of this.radio.groups) {
       if (g.kind === 'broadcast') continue;
@@ -628,6 +649,7 @@ export class Session {
     if (!this.radioUp()) return this.say('', 'No line of sight. The radio only reaches Minneapolis during a pass.', 3);
     const st = [...this.rumours].reverse().find((r) => r.active && !r.debunked);
     if (!st) return this.say('', 'No rumour going round right now.', 3);
+    if (!this.spendAir()) return;
     const r = rumourById(st.id);
     if (!st.seen) {
       for (const g of this.radio.groups) if (g.kind !== 'broadcast') g.trust = Math.max(0, g.trust - 0.08);
@@ -657,6 +679,14 @@ export class Session {
     {
       const st = this.street;
       stepResponders(this.resp, w, this.fires, this.env().hour, this.tick * 977 + 3, (a, b) => roadRoute(roadNet(), a, b), (x, y) => !!st && x >= st.x0 && y >= st.y0 && x < st.x0 + st.w && y < st.y0 + st.h, (text) => this.dispatch(text));
+    }
+    if (inWindow(this.t) && passIndex(this.t) !== this.airPass) {
+      this.airPass = passIndex(this.t);
+      this.air = AIR; // a new pass: the link budget is back
+    }
+    {
+      const ev = stepHoldouts(this.holds, w, this.t, this.env().dark, this.tick * 7121 + 9, (text) => this.holdRadio(text), this.env().news);
+      for (const h of ev.fell) this.holdLog.push({ t: this.t, id: h.id, text: `${localTime(this.t)} ${h.name} fell.` });
     }
     const statusBefore = this.radio.groups.map((g) => g.status);
     // Help that was sent drives along the streets, not through the river.
@@ -1303,6 +1333,78 @@ export class Session {
 
   /** Living and turned, counting the individuals in the street zone. */
   /** Dispatch radio: kept for the log; the odd line shown when it matters. */
+  private holdSaid = -1e9;
+  /** Holdout radio: only heard during a pass, and not every line. */
+  private holdRadio(text: string) {
+    if (this.mode !== 'play' || !inWindow(this.t)) return;
+    if (this.t - this.holdSaid < 120) return;
+    this.holdSaid = this.t;
+    this.say('Holdout', text, 7);
+  }
+  /** Spend one unit of air time; says why not if there is none left. */
+  spendAir(): boolean {
+    if (this.mode !== 'play') return true;
+    if (this.air <= 0) {
+      this.say('', 'No air time left this pass. The link is saturated; you can still look. Next pass, more.', 5);
+      return false;
+    }
+    this.air--;
+    return true;
+  }
+  /** SEE: the telescope low over a place during a pass: you know how it looks right now. */
+  look(x: number, y: number, radius: number) {
+    if (!this.canLook()) return;
+    for (const h of this.holds.list) {
+      if (Math.hypot(h.x - x, h.y - y) > radius) continue;
+      h.seenAt = this.t;
+      h.seen = { people: h.people, state: h.state, pressure: holdPressure(h, this.world), ammo: h.ammo };
+    }
+  }
+  /** SPEAK: on every channel near a holdout you have seen: "go to ...". People nearby decide;
+   *  more of them go, from further off, for the next 45 minutes. Crowding it is your risk. */
+  doRoute(id: number): string {
+    const h = this.holds.list[id];
+    if (!h) return '';
+    if (!this.radioUp()) return 'No line of sight. The radio only reaches Minneapolis during a pass.';
+    if (h.state === 'fallen') return `${h.name} has fallen. Nobody should go there.`;
+    if (!h.seen || this.t - h.seenAt > 10 * 60) return `Look at ${h.name} first (telescope down over it), then tell people to go there.`;
+    if (!this.spendAir()) return '';
+    h.routedUntil = this.t + 45 * 60;
+    this.holdLog.push({ t: this.t, id: h.id, text: `${localTime(this.t)} You told people near ${h.name} to go there.` });
+    const k = KINDS[h.kind];
+    this.say('You, on every channel', `If you're near ${h.name}: go there now, they have the doors shut and ${h.armed >= 5 ? 'guns' : 'room'}. Stay off the main roads.`, 6);
+    return `Routing people to the ${k.label}. You will see the result next pass.`;
+  }
+  /** Top spots where the dead and the living meet right now (what you see from orbit). */
+  hotSpots(n = 5): { x: number; y: number; dead: number; living: number; name: string }[] {
+    const w = this.world;
+    const out: { x: number; y: number; dead: number; living: number; name: string }[] = [];
+    const score = new Float32Array(w.healthy.length);
+    for (let i = 0; i < score.length; i++) score[i] = Math.min(w.healthy[i], w.infected[i] * 3);
+    for (let k = 0; k < 200 && out.length < n; k++) {
+      let bi = -1, bv = 5;
+      for (let i = 0; i < score.length; i++) if (score[i] > bv) (bv = score[i]), (bi = i);
+      if (bi < 0) break;
+      const x = (bi % GW) + 0.5, y = Math.floor(bi / GW) + 0.5;
+      let dead = 0, living = 0;
+      for (let dy = -3; dy <= 3; dy++)
+        for (let dx = -3; dx <= 3; dx++) {
+          const xx = Math.floor(x) + dx, yy = Math.floor(y) + dy;
+          if (xx < 0 || yy < 0 || xx >= GW || yy >= w.height) continue;
+          const j = yy * GW + xx;
+          dead += w.infected[j];
+          living += w.healthy[j];
+          score[j] = 0;
+        }
+      let name = '', nd = 1e9;
+      for (const p of places) {
+        const d = Math.hypot(p.x - x, p.y - y);
+        if (d < nd) (nd = d), (name = p.name || p.kind);
+      }
+      out.push({ x, y, dead, living, name: `near ${name.replace(/ \(2009\)$/, '')}` });
+    }
+    return out;
+  }
   private radioSaid = -1e9;
   private dispatch(text: string) {
     this.resp.radio.push({ t: this.t, text });
@@ -1374,8 +1476,8 @@ export class Session {
   }
 
   totals() {
-    let alive = count(this.world.healthy) + crewTotal(this.resp);
-    let dead = count(this.world.infected);
+    let alive = count(this.world.healthy) + crewTotal(this.resp) + sheltered(this.holds);
+    let dead = count(this.world.infected) + insideDead(this.holds);
     const s = this.street;
     if (s) {
       for (const a of s.agents) {

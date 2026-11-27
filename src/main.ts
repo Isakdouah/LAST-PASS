@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import { Sound } from './audio';
 import { fmt, inWindow, localTime, MPLS, realSeconds, subPoint, untilWindow, passIndex, passCentre, WINDOW } from './game/clock';
 import { tuned } from './game/radio';
-import { Box, GH, GW, Mode, places, Session, CELL_X, roadNet, insideBuilding, wet } from './game/session';
+import { Box, GH, GW, Mode, places, Session, CELL_X, AIR, roadNet, insideBuilding, wet } from './game/session';
 import { Pixel } from './engine/pixel';
 import { Globe, cityLights } from './engine/globe';
 import { CityLayer, cellToLocal, localToCell } from './engine/city';
@@ -535,7 +535,13 @@ function endText() {
   const r = game.radio;
   let h = `<h1>DAWN</h1><div>The station drifts away from Minneapolis.</div><br>`;
   h += `<div>Living: <span class="mark">${Math.round(alive).toLocaleString('en-US')}</span> of ${Math.round(game.startPop).toLocaleString('en-US')} (${Math.round((alive / game.startPop) * 100)}%) · Turned: ${Math.round(dead).toLocaleString('en-US')} · Fallen: ${Math.round(fallen).toLocaleString('en-US')}</div><br>`;
-  h += `<div>The people you talked to:</div><div class="small">`;
+  // The night goal: people alive in holdouts when the sun comes up.
+  const held = game.holds.list.filter((q) => q.state !== 'fallen' && q.people >= 1).sort((a, b) => b.people - a.people);
+  const inHolds = held.reduce((a, q) => a + q.people, 0);
+  const fell = game.holds.list.filter((q) => q.state === 'fallen');
+  h += `<div>In holdouts at dawn: <span class="mark">${Math.round(inHolds).toLocaleString('en-US')}</span> people in ${held.length} places. ${fell.length} places fell in the night.</div>`;
+  if (held.length) h += `<div class="small">${held.slice(0, 5).map((q) => `${esc(q.name)}: ${Math.round(q.people)}`).join(' · ')}</div>`;
+  h += `<br><div>The people you talked to:</div><div class="small">`;
   for (const g of r.groups) {
     if (g.kind === 'broadcast') continue;
     const hs = game.heroState(g.id);
@@ -727,6 +733,9 @@ function frame(now: number) {
   if (playing) {
     drawLabels();
     hud.update(game, { view, viewText: viewText(), hint: hintText(), keys: keysText(), name: playerName });
+    updateCalls(now);
+    // SEE: the telescope low over the city during a pass shows you the holdouts under it.
+    if (view === 'tele' && tele.d < 3 && inCityBox(tele.lat, tele.lon)) game.look(((tele.lon + 93.36) / 0.36) * GW, ((45.06 - tele.lat) / 0.19) * GH, (tele.d * 1000 * 0.45) / CELL_X);
     // The far side of the Earth goes by on fast forward.
     const ff = mode === 'play' && game.mode === 'play' && !inWindow(game.t) && lastClose >= 0;
     ffEl.style.display = ff ? 'block' : 'none';
@@ -878,7 +887,13 @@ function drawLabels() {
       cellToLocal(pl.x, pl.y, v, 6 + heightAt(pl.x, pl.y));
       const p = toScreen(v, camCity);
       if (p && p.x > 0 && p.x < W && p.y > 0 && p.y < H && v.distanceTo(camCity.position) < tele.d * 4000)
-        hud.label(p.x, p.y, (pl.kind === 'police' ? '■ ' : pl.kind === 'fire' ? '▲ ' : '✚ ') + (pl.name || pl.kind), 'place');
+        hud.label(p.x, p.y, (pl.kind === 'police' ? '■ ' : pl.kind === 'fire' ? '▲ ' : '✚ ') + (pl.name || pl.kind) + holdTag(pl.x, pl.y), 'place');
+    }
+    for (const q of game.holds.list) {
+      if (q.kind !== 'apartments') continue;
+      cellToLocal(q.x, q.y, v, 6 + heightAt(q.x, q.y));
+      const p = toScreen(v, camCity);
+      if (p && p.x > 0 && p.x < W && p.y > 0 && p.y < H && v.distanceTo(camCity.position) < tele.d * 4000) hud.label(p.x, p.y, '▣ ' + q.name + holdTag(q.x, q.y), 'place');
     }
   }
   // Your heroes: always marked during a pass, from street level up to the whole city.
@@ -986,12 +1001,88 @@ function showReport() {
     h += `<div class="rh${st.dead ? ' lost' : st.out ? ' out' : ''}"><b>${esc(hero.name)}</b> · ${head}</div>`;
     if (news.length) h += `<div class="rl">${news.map((n) => esc(n)).join('<br>')}</div>`;
   }
+  // Holdouts: what changed while you were away.
+  const hl = game.holdLog.filter((l) => l.t > from);
+  const inside = game.holds.list.filter((q) => q.state !== 'fallen' && q.people >= 1);
+  h += `<div class="rh">Holdouts · ${Math.round(inside.reduce((a, q) => a + q.people, 0)).toLocaleString('en-US')} people inside ${inside.length} places</div>`;
+  const routed = game.holds.list.filter((q) => q.routedUntil > from - 45 * 60 && q.routedUntil > 0 && q.routedUntil - 45 * 60 < from);
+  const lines = [
+    ...routed.map((q) => (q.state === 'fallen' ? `${q.name}, where you sent people, fell at ${localTime(q.fellAt)}.` : `${q.name}, where you sent people: ${Math.round(q.people)} inside now, still holding.`)),
+    ...hl.filter((l) => !routed.some((q) => q.id === l.id) && /fell/.test(l.text)).slice(0, 4).map((l) => l.text.replace(/^\d\d:\d\d /, '')),
+  ];
+  if (lines.length) h += `<div class="rl">${lines.map((n) => esc(n)).join('<br>')}</div>`;
   const lost = game.lossLog.length;
   h += `<div class="rf">${lost ? `${lost} radio contact${lost > 1 ? 's' : ''} lost tonight. ` : ''}Click to close.</div>`;
   reportEl.innerHTML = h;
   reportEl.classList.add('open');
   clearTimeout(reportTimer);
   reportTimer = window.setTimeout(() => reportEl.classList.remove('open'), 40000);
+}
+
+/** What you know about a holdout, for its map label: only what you have seen. */
+function holdTag(x: number, y: number): string {
+  const q = game.holds.list.find((o) => Math.abs(o.x - x) < 1 && Math.abs(o.y - y) < 1);
+  if (!q || !q.seen) return '';
+  if (q.seen.state === 'fallen') return ' · fell';
+  return q.seen.people >= 1 ? ` · ${Math.round(q.seen.people)} inside` : '';
+}
+
+// ---------- calls board: what you know, and where your air time could go ----------
+const callsEl = document.createElement('div');
+callsEl.id = 'calls';
+document.body.appendChild(callsEl);
+let callsAt = 0;
+let callsKey = '';
+function flyTo(x: number, y: number, d: number) {
+  if (view !== 'tele') setView('tele', 1.5);
+  tele.follow = false;
+  tele.tLat = 45.06 - (y / GH) * 0.19;
+  tele.tLon = -93.36 + (x / GW) * 0.36;
+  tele.tD = d;
+  tele.flying = true;
+}
+callsEl.addEventListener('pointerdown', (e) => {
+  // On press, not click: the board refreshes twice a second and a click can fall between two versions.
+  const el = (e.target as HTMLElement).closest('[data-act]') as HTMLElement | null;
+  if (!el) return;
+  e.stopPropagation();
+  const act = el.dataset.act!, x = Number(el.dataset.x), y = Number(el.dataset.y);
+  if (act === 'look') flyTo(x, y, 0.9);
+  if (act === 'route') {
+    handAct.talk = 3;
+    const msg = game.doRoute(Number(el.dataset.id));
+    if (msg) hud.say('', msg, 5);
+    callsKey = '';
+  }
+});
+function updateCalls(now: number) {
+  const on = mode === 'play' && game.mode === 'play' && game.canLook();
+  callsEl.style.display = on ? 'block' : 'none';
+  if (!on || now - callsAt < 500) return;
+  callsAt = now;
+  const air = '●'.repeat(game.air) + '○'.repeat(Math.max(0, AIR - game.air));
+  let h = `<div class="ct">CALLS <span class="air" title="Air time: what you can say on the radio this pass">air ${air}</span></div>`;
+  const seen = game.holds.list.filter((q) => q.seen && q.state !== 'fallen').sort((a, b) => b.seen!.people - a.seen!.people);
+  const lost = game.holds.list.filter((q) => q.seen && q.state === 'fallen' && q.fellAt <= q.seenAt);
+  h += `<div class="cs">Holdouts you have seen</div>`;
+  if (!seen.length) h += `<div class="cr dim">None yet. Bring the telescope down over a precinct, fire station, hospital or apartment block.</div>`;
+  for (const q of seen.slice(0, 5)) {
+    const v = q.seen!;
+    const ago = Math.round((game.t - q.seenAt) / 60);
+    const door = v.pressure > 40 ? '<span class="dead">dead at the door</span>' : v.pressure > 5 ? '<span class="scared">dead close</span>' : 'quiet';
+    const routed = q.routedUntil > game.t ? ' <span class="mark">· routing</span>' : '';
+    h += `<div class="cr"><span class="cn" data-act="look" data-x="${q.x}" data-y="${q.y}">${q.kind === 'precinct' ? '■' : q.kind === 'station' ? '▲' : q.kind === 'hospital' ? '✚' : '▣'} ${esc(q.name)}</span><br><span class="cd">${Math.round(v.people)} inside · ${door}${v.ammo < 40 && v.people > 0 ? ' · rounds low' : ''} · seen ${ago < 1 ? 'now' : ago + ' min ago'}${routed}</span>`;
+    if (q.routedUntil <= game.t) h += ` <span class="btn" data-act="route" data-id="${q.id}" title="Tell people nearby to go there (1 air time)">Route people here</span>`;
+    h += `</div>`;
+  }
+  for (const q of lost.slice(0, 2)) h += `<div class="cr lost">✕ ${esc(q.name)} · fell</div>`;
+  h += `<div class="cs">Hot spots (seen from orbit)</div>`;
+  for (const p of game.hotSpots(5)) h += `<div class="cr"><span class="cn" data-act="look" data-x="${p.x}" data-y="${p.y}">! ${esc(p.name)}</span> <span class="cd"><span class="dead">${Math.round(p.dead).toLocaleString('en-US')} dead</span> · ${Math.round(p.living).toLocaleString('en-US')} living</span></div>`;
+  h += `<div class="cf">Click a name to look. Results show next pass.</div>`;
+  if (h !== callsKey) {
+    callsKey = h;
+    callsEl.innerHTML = h;
+  }
 }
 
 requestAnimationFrame(frame);

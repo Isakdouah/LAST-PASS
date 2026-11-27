@@ -130,3 +130,20 @@ html, body { margin: 0; height: 100%; background: #04050a; overflow: hidden; }
 
 #fps { position: absolute; right: 16px; bottom: 30px; font-size: 12px; color: var(--mark); opacity: 0.8; pointer-events: none; }
 #fps.slow { color: #ff7050; opacity: 1; }
+#calls { position: fixed; right: 16px; top: 112px; width: 300px; max-height: calc(100vh - 260px); overflow: auto; display: none; background: var(--panel); padding: 8px 12px;
+  font-family: 'Pixelify Sans', monospace; font-size: 13px; line-height: 16px; color: var(--ink); -webkit-font-smoothing: none; }
+#calls .ct { color: var(--bright); font-weight: 700; letter-spacing: 1px; display: flex; justify-content: space-between; }
+#calls .air { color: var(--mark); font-weight: 400; letter-spacing: 0; }
+#calls .cs { margin-top: 8px; color: var(--mark); font-size: 12px; }
+#calls .cr { margin-top: 4px; }
+#calls .cr.dim, #calls .cf { opacity: 0.6; font-size: 12px; }
+#calls .cr.lost { color: #c06050; }
+#calls .cn { color: var(--bright); cursor: pointer; }
+#calls .cn:hover { color: var(--mark); }
+#calls .cd { font-size: 12px; }
+#calls .dead { color: var(--dead); }
+#calls .scared { color: var(--scared); }
+#calls .mark { color: var(--mark); }
+#calls .btn { display: inline-block; margin-top: 2px; padding: 0 6px; border: 1px solid var(--mark); color: var(--mark); cursor: pointer; font-size: 12px; }
+#calls .btn:hover { background: var(--mark); color: #000; }
+#calls .cf { margin-top: 8px; }
